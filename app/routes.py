@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from app.config import APP_NAME
+
 
 router = APIRouter()
 
@@ -17,7 +19,7 @@ class AskResponse(BaseModel):
 @router.get("/")
 def read_root():
     return {
-        "message": "Enterprise AI Knowledge & Workflow Agent",
+        "message": APP_NAME,
         "status": "running",
     }
 
@@ -26,7 +28,7 @@ def read_root():
 def health_check():
     return {
         "status": "healthy",
-        "application": "Enterprise AI Knowledge & Workflow Agent",
+        "application": APP_NAME,
     }
 
 

@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.config import APP_NAME
 from main import app
 
 
@@ -11,7 +12,7 @@ def test_root_returns_project_status():
 
     assert response.status_code == 200
     assert response.json() == {
-        "message": "Enterprise AI Knowledge & Workflow Agent",
+        "message": APP_NAME,
         "status": "running",
     }
 
@@ -22,7 +23,7 @@ def test_health_returns_healthy_status():
     assert response.status_code == 200
     assert response.json() == {
         "status": "healthy",
-        "application": "Enterprise AI Knowledge & Workflow Agent",
+        "application": APP_NAME,
     }
 
 
