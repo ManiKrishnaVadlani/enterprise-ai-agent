@@ -3,12 +3,16 @@
 import logging
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
+from app.auth import get_rate_limited_user
 from app.config import Settings
+from app.dependencies import get_services
 from app.errors import (
     AgentError,
     DocumentNotFoundError,
@@ -18,7 +22,8 @@ from app.errors import (
     StorageError,
 )
 from app.rag import NO_DOCUMENTS_ANSWER
-from app.services import ApplicationServices, build_services
+from app.models import UserRecord
+from app.services import ApplicationServices
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +47,7 @@ class ReadyResponse(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    document_id: str | None = None
+    document_id: UUID | None = None
 
     @field_validator("question")
     @classmethod
@@ -81,15 +86,6 @@ class DocumentResponse(BaseModel):
 class DocumentListResponse(BaseModel):
     documents: list[DocumentResponse]
     total: int
-
-
-def get_services(request: Request) -> ApplicationServices:
-    """Create app services on first use so importing the app has no DB side effect."""
-    services = request.app.state.services
-    if services is None:
-        services = build_services(request.app.state.settings)
-        request.app.state.services = services
-    return services
 
 
 @router.get("/", response_model=RootResponse, summary="Application status")
@@ -137,16 +133,48 @@ async def upload_document(
     request: Request,
     filename: Annotated[str, Header(alias="X-Filename")],
     services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
 ):
     settings: Settings = request.app.state.settings
-    content = bytearray()
-    async for part in request.stream():
-        if len(content) + len(part) > settings.max_upload_bytes:
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            content_length = int(declared_length)
+        except ValueError as error:
+            raise InvalidDocumentError(
+                "Content-Length must be a non-negative integer."
+            ) from error
+        if content_length < 0:
+            raise InvalidDocumentError(
+                "Content-Length must be a non-negative integer."
+            )
+        if content_length > settings.max_upload_bytes:
             raise InvalidDocumentError(
                 f"The document exceeds the {settings.max_upload_bytes}-byte upload limit."
             )
-        content.extend(part)
-    result = services.documents.ingest(filename, bytes(content))
+    upload_limiter = request.app.state.upload_limiter
+    if not await run_in_threadpool(upload_limiter.acquire):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Upload capacity is busy. Try again shortly.",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        content = bytearray()
+        async for part in request.stream():
+            if len(content) + len(part) > settings.max_upload_bytes:
+                raise InvalidDocumentError(
+                    f"The document exceeds the {settings.max_upload_bytes}-byte upload limit."
+                )
+            content.extend(part)
+        result = await run_in_threadpool(
+            services.documents.ingest,
+            filename,
+            bytes(content),
+            owner_id=current_user.user_id,
+        )
+    finally:
+        upload_limiter.release()
     logger.info("Document ingestion completed.")
     return result
 
@@ -158,8 +186,9 @@ async def upload_document(
 )
 def list_documents(
     services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
 ):
-    documents = services.documents.list_documents()
+    documents = services.documents.list_documents(owner_id=current_user.user_id)
     return {"documents": documents, "total": len(documents)}
 
 
@@ -169,10 +198,11 @@ def list_documents(
     summary="Delete a document and its chunks",
 )
 def delete_document(
-    document_id: str,
+    document_id: UUID,
     services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
 ):
-    services.documents.delete_document(document_id)
+    services.documents.delete_document(str(document_id), owner_id=current_user.user_id)
     logger.info("Document deletion completed.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -181,9 +211,14 @@ def delete_document(
 def ask_question(
     request_body: AskRequest,
     services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
 ):
     logger.info("Ask request received.")
-    result = services.rag.answer(request_body.question, request_body.document_id)
+    result = services.rag.answer(
+        request_body.question,
+        str(request_body.document_id) if request_body.document_id else None,
+        owner_id=current_user.user_id,
+    )
     if result.answer != NO_DOCUMENTS_ANSWER:
         logger.info("Grounded answer prepared.")
     return {

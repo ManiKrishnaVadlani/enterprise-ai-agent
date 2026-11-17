@@ -8,6 +8,10 @@ from app.models import ExtractedPage
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".pdf"}
+DEFAULT_MAX_PDF_PAGES = 200
+DEFAULT_MAX_EXTRACTED_TEXT_CHARS = 2_000_000
+PDF_ROOT_OBJECT_RECOVERY_LIMIT = 1_000
+PDF_XREF_STREAM_MAXIMUM_ENTRIES = 200_000
 
 
 def validate_filename(filename: str) -> str:
@@ -23,9 +27,16 @@ def validate_filename(filename: str) -> str:
     return filename
 
 
-def extract_text(filename: str, content: bytes) -> list[ExtractedPage]:
+def extract_text(
+    filename: str,
+    content: bytes,
+    max_pdf_pages: int = DEFAULT_MAX_PDF_PAGES,
+    max_extracted_text_chars: int = DEFAULT_MAX_EXTRACTED_TEXT_CHARS,
+) -> list[ExtractedPage]:
     """Extract non-empty text pages after checking extension and file signature."""
     validate_filename(filename)
+    if max_pdf_pages < 1 or max_extracted_text_chars < 1:
+        raise ValueError("PDF page and extracted text limits must be positive.")
     if not content:
         raise InvalidDocumentError("The uploaded document is empty.")
 
@@ -34,6 +45,8 @@ def extract_text(filename: str, content: bytes) -> list[ExtractedPage]:
             text = content.decode("utf-8-sig").strip()
         except UnicodeDecodeError as error:
             raise InvalidDocumentError("TXT files must use UTF-8 encoding.") from error
+        if len(text) > max_extracted_text_chars:
+            raise InvalidDocumentError("The extracted text exceeds the configured limit.")
         if not text:
             raise InvalidDocumentError("The document contains no extractable text.")
         return [ExtractedPage(text=text)]
@@ -44,14 +57,27 @@ def extract_text(filename: str, content: bytes) -> list[ExtractedPage]:
     try:
         from pypdf import PdfReader
 
-        reader = PdfReader(BytesIO(content), strict=False)
+        reader = PdfReader(
+            BytesIO(content),
+            strict=False,
+            root_object_recovery_limit=PDF_ROOT_OBJECT_RECOVERY_LIMIT,
+            xref_stream_maximum_entries=PDF_XREF_STREAM_MAXIMUM_ENTRIES,
+        )
         if reader.is_encrypted:
             raise InvalidDocumentError("Encrypted PDF files are not supported.")
-        pages = [
-            ExtractedPage(text=text.strip(), page_number=number)
-            for number, page in enumerate(reader.pages, start=1)
-            if (text := page.extract_text() or "").strip()
-        ]
+        if len(reader.pages) > max_pdf_pages:
+            raise InvalidDocumentError("The PDF exceeds the configured page limit.")
+        pages = []
+        total_characters = 0
+        for number, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            total_characters += len(text)
+            if total_characters > max_extracted_text_chars:
+                raise InvalidDocumentError(
+                    "The extracted text exceeds the configured limit."
+                )
+            if text.strip():
+                pages.append(ExtractedPage(text=text.strip(), page_number=number))
     except InvalidDocumentError:
         raise
     except Exception as error:

@@ -33,6 +33,30 @@ def test_extract_text_rejects_unsupported_empty_and_invalid_utf8_files():
         extract_text("bad.txt", b"\xff")
 
 
+def test_text_extraction_enforces_extracted_character_limit():
+    with pytest.raises(InvalidDocumentError, match="extracted text exceeds"):
+        extract_text("policy.txt", b"12345", max_extracted_text_chars=4)
+
+
+def test_pdf_extraction_enforces_page_and_extracted_text_limits(monkeypatch):
+    class FakePage:
+        def extract_text(self):
+            return "text"
+
+    class FakeReader:
+        is_encrypted = False
+        pages = [FakePage(), FakePage()]
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
+    with pytest.raises(InvalidDocumentError, match="page limit"):
+        extract_text("policy.pdf", b"%PDF-1.7", max_pdf_pages=1)
+    with pytest.raises(InvalidDocumentError, match="extracted text exceeds"):
+        extract_text("policy.pdf", b"%PDF-1.7", max_extracted_text_chars=7)
+
+
 def test_pdf_extraction_preserves_page_numbers(monkeypatch):
     class FakePage:
         def __init__(self, text):
@@ -45,8 +69,12 @@ def test_pdf_extraction_preserves_page_numbers(monkeypatch):
         is_encrypted = False
         pages = [FakePage("first page"), FakePage("  "), FakePage("third page")]
 
-        def __init__(self, _stream, strict):
+        def __init__(self, _stream, strict, **parser_limits):
             assert strict is False
+            assert parser_limits == {
+                "root_object_recovery_limit": 1000,
+                "xref_stream_maximum_entries": 200000,
+            }
 
     monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
 
@@ -97,7 +125,7 @@ def test_pdf_extraction_rejects_invalid_signature_and_encrypted_files(monkeypatc
     class EncryptedReader:
         is_encrypted = True
 
-        def __init__(self, _stream, strict):
+        def __init__(self, _stream, strict, **_parser_limits):
             pass
 
     monkeypatch.setitem(

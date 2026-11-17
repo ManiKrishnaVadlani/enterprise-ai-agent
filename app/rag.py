@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from app.embeddings import EmbeddingProvider
-from app.errors import ProviderError
+from app.errors import DocumentNotFoundError, ProviderError
 from app.llm import NO_INFORMATION_ANSWER, LanguageModelProvider
 from app.models import SearchResult
 from app.vector_store import SQLiteVectorStore
@@ -42,18 +42,32 @@ class RAGPipeline:
         self.top_k = top_k
         self.min_relevance_score = min_relevance_score
 
-    def answer(self, question: str, document_id: str | None = None) -> Answer:
-        documents = self.store.list_documents()
-        if not documents or (
-            document_id is not None
-            and all(document.document_id != document_id for document in documents)
+    def answer(
+        self,
+        question: str,
+        document_id: str | None = None,
+        owner_id: str | None = None,
+    ) -> Answer:
+        documents = (
+            self.store.list_documents(owner_id=owner_id)
+            if owner_id is not None
+            else self.store.list_documents()
+        )
+        if document_id is not None and all(
+            document.document_id != document_id for document in documents
         ):
+            if owner_id is not None:
+                raise DocumentNotFoundError("The requested document was not found.")
+            return Answer(answer=NO_DOCUMENTS_ANSWER, sources=[])
+        if not documents:
             return Answer(answer=NO_DOCUMENTS_ANSWER, sources=[])
         try:
             query_vectors = self.embeddings.embed([question])
             if len(query_vectors) != 1:
                 raise ProviderError("The embedding provider returned no query vector.")
-            matches = self.store.search(query_vectors[0], self.top_k, document_id)
+            matches = self.store.search(
+                query_vectors[0], self.top_k, document_id, owner_id
+            )
         except ProviderError:
             raise
 

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 
 import pytest
@@ -46,7 +47,14 @@ def _client(tmp_path, max_upload_bytes=1000):
         ),
         rag=RAGPipeline(store, embeddings, FakeLanguageModel()),
     )
-    return TestClient(create_app(settings=settings, services=services))
+    user = store.create_user("API test user")
+    token = "eak_api_test_token_" + ("x" * 32)
+    store.store_api_token_hash(
+        user.user_id, hashlib.sha256(token.encode("utf-8")).hexdigest()
+    )
+    client = TestClient(create_app(settings=settings, services=services))
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    return client
 
 
 def test_upload_list_ask_with_citations_and_delete_document(tmp_path):
@@ -99,8 +107,49 @@ def test_upload_rejects_invalid_filename_content_and_oversize(tmp_path):
     assert oversized.status_code == 400
 
 
+def test_upload_rejects_declared_oversize_before_reading_body(tmp_path):
+    client = _client(tmp_path, max_upload_bytes=10)
+    response = client.post(
+        "/documents/upload",
+        headers={
+            "X-Filename": "policy.txt",
+            "Content-Length": "11",
+            "Content-Type": "application/octet-stream",
+        },
+        content=b"x",
+    )
+    assert response.status_code == 400
+    assert "upload limit" in response.json()["detail"]
+
+
+def test_authenticated_rate_limit_and_cors_filename_header(tmp_path):
+    from app.limits import UserRateLimiter
+
+    client = _client(tmp_path)
+    client.app.state.rate_limiter = UserRateLimiter(1, 60)
+    first = client.get("/documents")
+    limited = client.get("/documents")
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"]
+    assert client.get("/health").status_code == 200
+
+    preflight = client.options(
+        "/documents/upload",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type,x-filename",
+        },
+    )
+    assert preflight.status_code == 200
+    assert "x-filename" in preflight.headers["access-control-allow-headers"].lower()
+
+
 def test_delete_unknown_document_returns_not_found(tmp_path):
-    response = _client(tmp_path).delete("/documents/missing-id")
+    response = _client(tmp_path).delete(
+        "/documents/00000000-0000-0000-0000-000000000001"
+    )
 
     assert response.status_code == 404
     assert response.json() == {"detail": "The requested document was not found."}
@@ -109,6 +158,7 @@ def test_delete_unknown_document_returns_not_found(tmp_path):
 def test_provider_configuration_error_is_safe_and_uses_service_unavailable(tmp_path):
     settings = Settings(database_path=tmp_path / "provider-error.db")
     store = SQLiteVectorStore(settings.database_path)
+    user = store.create_user("API provider test user")
     now = datetime.now(timezone.utc)
     chunk = DocumentChunk(
         chunk_id="stored-chunk",
@@ -119,7 +169,8 @@ def test_provider_configuration_error_is_safe_and_uses_service_unavailable(tmp_p
         ingested_at=now,
     )
     store.add_document(
-        "stored-document", "policy.txt", [chunk], [[1.0, 0.0]]
+        "stored-document", "policy.txt", [chunk], [[1.0, 0.0]],
+        owner_id=user.user_id,
     )
     embeddings = OpenAIEmbeddingProvider(None, "model")
     services = ApplicationServices(
@@ -133,8 +184,15 @@ def test_provider_configuration_error_is_safe_and_uses_service_unavailable(tmp_p
         ),
     )
 
-    response = TestClient(create_app(settings, services)).post(
-        "/ask", json={"question": "What does the policy say?"}
+    token = "eak_api_provider_test_" + ("x" * 32)
+    store.store_api_token_hash(
+        user.user_id, hashlib.sha256(token.encode("utf-8")).hexdigest()
+    )
+    client = TestClient(create_app(settings, services))
+    response = client.post(
+        "/ask",
+        json={"question": "What does the policy say?"},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 503

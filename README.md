@@ -13,9 +13,10 @@ Organizations keep useful policies and procedures in documents that are difficul
 - Local deterministic feature-hash embeddings and extractive answers for no-cost end-to-end demos.
 - OpenAI embedding and chat provider adapters, configured through environment variables.
 - Persistent SQLite storage for document metadata, chunks, and embeddings.
+- Bearer-token authentication with user-owned document listing, retrieval, and deletion.
 - Cosine-similarity retrieval, configurable top-k, optional document filtering, and source citations.
 - Document upload, list, and delete API operations.
-- Privacy-safe request logging, bounded provider timeouts/retries, safe API errors, and configurable CORS.
+- Privacy-safe request logging, bounded uploads and PDF processing, authenticated rate limits, safe API errors, and configurable CORS.
 - Mock-based tests that do not make paid API calls.
 
 ## Architecture and request flow
@@ -51,26 +52,31 @@ Documents are read into memory, extracted, divided into chunks, embedded, and wr
 
 ### Vector storage choice
 
-The MVP uses a SQLite table with JSON-encoded vectors and a cosine-similarity scan. This gives the project durable local storage without requiring a separate database service, which suits a small portfolio demo and this environment (Docker is not installed). Search time grows linearly with the number of chunks, so this is not intended for a large corpus. A future scale-up can move the store interface to PostgreSQL with pgvector.
+The MVP uses a SQLite table with JSON-encoded vectors and a cosine-similarity scan. This gives the project durable local storage without requiring a separate database service. Search time grows linearly with the number of chunks, so this is intended for a small corpus. A future scale-up can move the store interface to PostgreSQL with pgvector.
 
 ## Project structure
 
 ```text
 app/
+  auth.py              # bearer-token authentication
   chunking.py          # configurable text chunking
   config.py            # environment settings
+  dependencies.py      # lazy service dependency
   document_service.py  # ingestion, list, delete
   embeddings.py        # local and OpenAI embedding providers
   errors.py            # safe application exceptions
+  limits.py            # upload and request limits
   llm.py               # extractive and OpenAI answer providers
   local_text.py        # shared local token handling
   logging_config.py    # privacy-conscious logging setup
   models.py            # shared data objects
+  provisioning.py      # administrator user/token CLI
   rag.py               # retrieval, context assembly, citations
-  routes.py             # FastAPI endpoints and error mapping
+  routes.py            # FastAPI endpoints and error mapping
   services.py          # application service composition
   text_extraction.py   # TXT and PDF extraction
   vector_store.py      # persistent SQLite cosine-search store
+docs/                  # architecture and technical decisions
 tests/                 # API, service, provider, and Python learning tests
 main.py                # FastAPI app factory and application entry point
 Dockerfile
@@ -105,6 +111,12 @@ With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI creden
 | `TOP_K` | `4` | Maximum retrieved passages (1–20) |
 | `MIN_RELEVANCE_SCORE` | `0.15` | Minimum cosine score included in context (0–1) |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum upload size (10 MiB) |
+| `MAX_CONCURRENT_UPLOADS` | `2` | Concurrent ingestion limit per process |
+| `UPLOAD_WAIT_TIMEOUT_SECONDS` | `5` | Maximum wait for an upload slot |
+| `MAX_PDF_PAGES` | `200` | Maximum pages per PDF |
+| `MAX_EXTRACTED_TEXT_CHARS` | `2000000` | Maximum extracted characters per document |
+| `RATE_LIMIT_REQUESTS` | `120` | Authenticated requests per user in the window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Per-user sliding-window length |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated allowed origins |
 
 Chunking normalizes repeated whitespace, prefers word boundaries where possible, and applies overlap to retain context between neighboring chunks. PDF pages are chunked separately so page citations remain accurate. Scanned-image PDFs do not contain extractable text and are rejected as empty; OCR is not included.
@@ -132,6 +144,13 @@ python -m uvicorn main:app --reload
 
 Open Swagger UI at `http://127.0.0.1:8000/docs`. The liveness endpoint is `/health`; `/ready` checks SQLite readiness.
 
+Provision an API user from an interactive terminal before calling protected document endpoints. The plaintext token is displayed once; store it securely. SQLite stores only its SHA-256 hash.
+
+```powershell
+python -m app.provisioning create-user --display-name "Local user" --label "development"
+python -m app.provisioning revoke --token-id <token-id>
+```
+
 ## API
 
 All endpoints are documented in Swagger/OpenAPI.
@@ -146,10 +165,13 @@ All endpoints are documented in Swagger/OpenAPI.
 | `DELETE` | `/documents/{document_id}` | Delete a document and all its chunks |
 | `POST` | `/ask` | Retrieve passages and return an answer with sources |
 
+`/`, `/health`, and `/ready` are public. Upload, list, delete, and ask require `Authorization: Bearer <token>`. Documents are scoped to their owner in the SQLite queries. Legacy documents without an owner remain stored but are not visible in user-scoped list or search results; specific access and deletion return 404.
+
 Upload the raw file bytes with `X-Filename` and `Content-Type: application/octet-stream`:
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/documents/upload" `
+  -H "Authorization: Bearer $env:AGENT_API_TOKEN" `
   -H "X-Filename: handbook.txt" `
   -H "Content-Type: application/octet-stream" `
   --data-binary "@handbook.txt"
@@ -159,6 +181,7 @@ Ask a question:
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/ask" `
+  -H "Authorization: Bearer $env:AGENT_API_TOKEN" `
   -H "Content-Type: application/json" `
   -d '{"question":"What does the handbook say about access reviews?"}'
 ```
@@ -168,8 +191,8 @@ The answer response includes `question`, `answer`, and `sources`. Each source ha
 List indexed documents and delete a document with:
 
 ```powershell
-curl.exe "http://127.0.0.1:8000/documents"
-curl.exe -X DELETE "http://127.0.0.1:8000/documents/<document-id>"
+curl.exe "http://127.0.0.1:8000/documents" -H "Authorization: Bearer $env:AGENT_API_TOKEN"
+curl.exe -X DELETE "http://127.0.0.1:8000/documents/<document-id>" -H "Authorization: Bearer $env:AGENT_API_TOKEN"
 ```
 
 ## Tests
@@ -180,20 +203,20 @@ Install the requirements, then run the full suite:
 python -m pytest -p no:cacheprovider
 ```
 
-All provider and storage tests use local fakes and do not call paid APIs. When run inside Codex's restricted process environment, HTTP tests can stall before reaching a route because Windows' Proactor loop cannot open its fallback local socket pair there. With local socket access enabled, the complete suite passed on the same Python 3.14.7 interpreter. No event-loop workaround is applied. To run only non-HTTP tests inside the restricted process environment, use:
+All provider and storage tests use local fakes and do not call paid APIs. HTTP tests are marked `http` so the non-HTTP suite can run separately where Windows' Proactor loop cannot create its fallback local socket pair. No event-loop workaround is applied. Run non-HTTP tests with:
 
 ```powershell
 python -m pytest -p no:cacheprovider -m "not http"
 ```
 
-The HTTP tests remain enabled and run in the Ubuntu GitHub Actions workflow. The bounded comparison confirmed this is a process-environment restriction rather than an application or Python 3.14 compatibility failure.
+The HTTP tests remain enabled in the complete suite and CI. A passing non-HTTP run does not replace running the HTTP tests in an environment where the Windows event loop can initialize.
 
 ## Docker deployment
 
-Docker and Docker Compose are not installed in the current workspace, so the container configuration is supplied but cannot be built or run here.
+Compose defaults to local demo mode and binds the published API port to `127.0.0.1`. The service runs as a non-root user, with a read-only root filesystem, temporary `/tmp`, dropped Linux capabilities, and the named `agent-data` volume mounted at `/data`. Compose does not pass an OpenAI API key; keep this container in local mode. OpenAI mode remains available for direct local runs when explicitly configured.
 
 1. Install Docker Desktop with Compose support.
-2. Local demo mode is the default and needs no API key. To use OpenAI providers, set `AI_MODE=openai` and `OPENAI_API_KEY` in your shell or `.env` file.
+2. Compose intentionally runs only the no-key local mode. For a direct local Python run, OpenAI providers can be enabled with `AI_MODE=openai` and `OPENAI_API_KEY` in the shell or ignored `.env` file; this may incur charges.
 3. From the repository directory, run:
 
    ```powershell
@@ -205,37 +228,13 @@ Docker and Docker Compose are not installed in the current workspace, so the con
 4. Open `http://localhost:8000/docs` and check `http://localhost:8000/ready`.
 5. Stop the API with `docker compose down`. The named `agent-data` volume retains SQLite data. To intentionally remove that persistent data, use `docker compose down -v`.
 
-The container runs as a non-root user. Secrets are passed through the environment, not copied into the image. SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`, while OpenAI mode uses `/data/knowledge.db`.
+SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. Avoid `docker compose down -v` unless you intentionally want to remove the persistent database volume.
 
 ## Known limitations and future improvements
 
 - SQLite similarity search scans all stored vectors; migrate to pgvector for larger corpora or concurrent workloads.
-- The app has no user authentication, authorization, tenant isolation, malware scanning, or per-user document permissions. Do not expose it publicly with sensitive data as-is.
+- Authentication and document ownership are implemented, but this remains a local demonstration service. Rate limits are process-local; there is no administrator web interface or malware scanning. Do not expose it publicly with sensitive data without a deployment-specific security review.
 - Text-only PDFs are supported; OCR, Office documents, and HTML are not.
 - OpenAI mode is instructed to stay within context, but generated prose is probabilistic. Local mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
 - No job queue, streaming answers, feedback capture, workflow actions, or frontend is included.
-- Add authentication/authorization, OCR, PostgreSQL with pgvector, background ingestion, rate limiting, and evaluation/monitoring before production use.
-
-## Interview explanation
-
-This is a modular RAG API. Ingestion validates uploads, extracts text, chunks by character windows with overlap, embeds chunks through a provider interface, and stores vectors plus source metadata in SQLite. At question time it embeds the question, ranks chunks with cosine similarity, filters by a configurable score, and returns source citations. Local mode selects matching sentences from the retrieved passages; optional OpenAI mode asks the configured language model to answer from the same source-labeled context. Provider interfaces and fake-backed tests keep business logic testable without API calls. SQLite keeps local deployment simple; its linear search and lack of authentication are explicit MVP limits.
-
-### Interview questions and answers
-
-**Why use RAG instead of putting the documents directly in a prompt?** The service retrieves a small number of relevant chunks, so the prompt stays bounded and the response can identify which indexed passages were used.
-
-**How do you preserve source references?** Each chunk stores its document ID, filename, timestamp, and optional PDF page. Retrieval carries that metadata through to the response's `sources` list.
-
-**Why SQLite instead of pgvector?** SQLite makes the MVP persistent and easy to run locally without a database service. The tradeoff is a linear similarity scan, which is suitable only for a small corpus.
-
-**How are the integrations tested without paid API calls?** Ingestion and RAG depend on embedding and language-model interfaces. Tests inject small fakes, and provider adapter tests use fake SDK-shaped clients.
-
-**How do you reduce unsupported answers?** Retrieval applies a minimum similarity score. The system prompt tells the model to use only retrieved context and acknowledge when evidence is missing; the API returns source metadata for review. This reduces risk but cannot guarantee that generated prose is always correct.
-
-**What would you change before a production rollout?** Add authentication and per-document authorization, move vectors to pgvector when the corpus grows, add OCR/background ingestion, and evaluate retrieval and answer quality on a representative dataset.
-
-### Resume bullet points
-
-- Built a modular FastAPI RAG API for PDF/TXT ingestion, text extraction, configurable chunking, embedding, similarity retrieval, and source-aware answers.
-- Implemented persistent SQLite vector storage with cosine ranking, document filtering/deletion, chunk metadata, and configurable retrieval limits.
-- Added mock-backed tests for ingestion, chunking, storage, provider adapters, retrieval, error handling, citations, and API behavior; **102 tests passed** in the current Python 3.14.7 environment.
+- Consider shared rate limiting, malware scanning, OCR, PostgreSQL with pgvector, background ingestion, and retrieval-quality monitoring before production use.

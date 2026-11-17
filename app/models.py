@@ -32,3 +32,22 @@ class DocumentSummary:
     filename: str
     ingested_at: datetime
     chunk_count: int
+    owner_id: str | None = None
+
+
+@dataclass(frozen=True)
+class UserRecord:
+    user_id: str
+    display_name: str
+    created_at: datetime
+    is_active: bool
+
+
+@dataclass(frozen=True)
+class ApiTokenRecord:
+    token_id: str
+    user_id: str
+    token_hash: str
+    label: str | None
+    created_at: datetime
+    revoked_at: datetime | None

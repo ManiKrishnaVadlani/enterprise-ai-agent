@@ -1,4 +1,5 @@
 import builtins
+import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +8,7 @@ from app.config import Settings
 from app.embeddings import LocalEmbeddingProvider
 from app.llm import ExtractiveAnswerProvider
 from app.rag import NO_DOCUMENTS_ANSWER
+from app.services import build_services
 from main import create_app
 
 
@@ -32,8 +34,15 @@ def test_local_mode_runs_upload_retrieval_citations_and_delete_without_openai(
         chunk_overlap=50,
         min_relevance_score=0.1,
     )
-    application = create_app(settings=settings)
+    services = build_services(settings)
+    user = services.store.create_user("Local mode test user")
+    token = "eak_local_test_" + ("x" * 32)
+    services.store.store_api_token_hash(
+        user.user_id, hashlib.sha256(token.encode("utf-8")).hexdigest()
+    )
+    application = create_app(settings=settings, services=services)
     client = TestClient(application)
+    client.headers.update({"Authorization": f"Bearer {token}"})
 
     upload = client.post(
         "/documents/upload",

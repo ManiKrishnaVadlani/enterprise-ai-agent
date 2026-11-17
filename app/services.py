@@ -42,6 +42,8 @@ def build_services(settings: Settings) -> ApplicationServices:
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
             max_upload_bytes=settings.max_upload_bytes,
+            max_pdf_pages=settings.max_pdf_pages,
+            max_extracted_text_chars=settings.max_extracted_text_chars,
         ),
         rag=RAGPipeline(
             store=store,
