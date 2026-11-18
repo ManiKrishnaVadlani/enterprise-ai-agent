@@ -11,7 +11,7 @@ Organizations keep useful policies and procedures in documents that are difficul
 - PDF and UTF-8 TXT extraction, validation, size limits, and path-safe filenames.
 - Configurable character chunking with overlap and page-aware PDF metadata.
 - Local deterministic feature-hash embeddings and extractive answers for no-cost end-to-end demos.
-- OpenAI embedding and chat provider adapters, configured through environment variables.
+- Optional Ollama local chat and OpenAI embedding/chat provider adapters, selected through environment variables.
 - Persistent SQLite storage for document metadata, chunks, and embeddings.
 - Bearer-token authentication with user-owned document listing, retrieval, and deletion.
 - Cosine-similarity retrieval, configurable top-k, optional document filtering, and source citations.
@@ -38,7 +38,7 @@ flowchart LR
     RAG --> API
 ```
 
-Documents are read into memory, extracted, divided into chunks, embedded, and written to SQLite. Uploaded files are not saved. For a question, the service embeds the query, ranks stored chunks by cosine similarity, and filters low-scoring results. Local mode selects sentences from retrieved passages; OpenAI mode requests a grounded answer from the configured language model. The API returns the answer and structured source citations. If no useful passage is found, both modes return a safe no-information response.
+Documents are read into memory, extracted, divided into chunks, embedded, and written to SQLite. Uploaded files are not saved. For a question, the service embeds the query, ranks stored chunks by cosine similarity, and filters low-scoring results. `LLM_PROVIDER` selects extractive, local Ollama, or OpenAI answer generation. The RAG pipeline validates source references in application code before returning citations. If no useful passage is found, it returns a safe no-information response.
 
 ## Technology stack
 
@@ -47,7 +47,7 @@ Documents are read into memory, extracted, divided into chunks, embedded, and wr
 - SQLite for persistent document and vector data
 - pypdf for PDF text extraction
 - OpenAI Python SDK for the optional paid provider mode
-- Python standard library for local feature hashing and extractive answers
+- Python standard library for local feature hashing, extractive answers, and Ollama HTTP requests
 - pytest for automated tests
 
 ### Vector storage choice
@@ -66,7 +66,7 @@ app/
   embeddings.py        # local and OpenAI embedding providers
   errors.py            # safe application exceptions
   limits.py            # upload and request limits
-  llm.py               # extractive and OpenAI answer providers
+  llm.py               # extractive, Ollama, and OpenAI answer providers
   local_text.py        # shared local token handling
   logging_config.py    # privacy-conscious logging setup
   models.py            # shared data objects
@@ -94,12 +94,21 @@ python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI credentials or network calls. To opt into OpenAI, set `AI_MODE=openai` and `OPENAI_API_KEY` in `.env`; obtain a key from the [OpenAI API dashboard](https://platform.openai.com/api-keys). OpenAI requests can incur charges. Local mode never falls back to OpenAI if its provider fails.
+With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI credentials or network calls. By default `LLM_PROVIDER` is `extractive`; choose `ollama` for local generated answers or `openai` for hosted chat. OpenAI embeddings are selected separately with `AI_MODE=openai`. OpenAI requests can incur charges. The application never silently falls back to OpenAI or another answer provider.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AI_MODE` | `local` | Selects `local` or `openai`; invalid values stop startup |
-| `OPENAI_API_KEY` | unset | Credential used only when `AI_MODE=openai` |
+| `LLM_PROVIDER` | unset (resolves by `AI_MODE`) | `extractive`, `ollama`, or `openai`; local defaults to extractive and OpenAI mode defaults to OpenAI |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP endpoint; only loopback and `host.docker.internal` names are accepted |
+| `OLLAMA_MODEL` | `qwen3.5:2b-q4_K_M` | Installed Ollama model tag |
+| `OLLAMA_TIMEOUT_SECONDS` | `120` | Maximum wait for a local generation request |
+| `OLLAMA_TEMPERATURE` | `0.1` | Ollama generation temperature (0–2) |
+| `OLLAMA_THINK` | `false` | Disables separate reasoning output by default so answer text fits the output budget; set `true` only when desired and supported by the selected model |
+| `OLLAMA_NUM_PREDICT` | `512` | Maximum generated tokens (1–4096) |
+| `OLLAMA_CONTEXT_LENGTH` | `4096` | Ollama context window limit (512–32768 tokens) |
+| `OLLAMA_MAX_PROMPT_CHARS` | `12000` | Rejects oversized question plus retrieved context before sending it |
+| `OPENAI_API_KEY` | unset | Credential required if `AI_MODE=openai` embeddings or `LLM_PROVIDER=openai` answers are selected |
 | `APP_NAME` | `Enterprise AI Knowledge & Workflow Agent` | Root response and API title |
 | `LOG_LEVEL` | `INFO` | Application log level |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
@@ -133,11 +142,38 @@ Local mode has its own database file so it will not mix local vectors with an ex
 
 `AI_MODE=local` is the default. Its embedding provider hashes normalized word and adjacent-word features into a fixed-size vector using only the Python standard library. The result is deterministic and searchable by cosine similarity, but it is a lightweight keyword-feature approximation: it does not understand meaning, synonyms, or context like a trained embedding model. Hash collisions are possible.
 
-The local answer provider selects up to three sentences from retrieved chunks. A sentence must cover at least half of the question's meaningful terms; candidates are ranked by question coverage and sentence precision. It appends each selected sentence's source label and abstains with the shared no-information response when evidence is insufficient. This is still lexical matching: it does not understand meaning, paraphrase, or synthesize claims, and is not equivalent to an LLM.
+The extractive answer provider selects up to three sentences from retrieved chunks. A sentence must cover at least half of the question's meaningful terms; candidates are ranked by question coverage and sentence precision. It appends each selected sentence's source label and abstains with the shared no-information response when evidence is insufficient. This is still lexical matching: it does not understand meaning, paraphrase, or synthesize claims, and is not equivalent to an LLM.
 
 Retrieval applies the configured minimum score to all owner- and document-scoped candidates before taking the top-k passages. Local feature-hash and OpenAI embedding scores can have different distributions, so `LOCAL_MIN_RELEVANCE_SCORE` and `OPENAI_MIN_RELEVANCE_SCORE` can override the shared fallback independently. The repository's small evaluation set is a regression smoke test, not a universal score calibration dataset.
 
 To use OpenAI later, set `AI_MODE=openai` and provide `OPENAI_API_KEY`. This explicitly enables live embedding and chat requests, which may incur charges. If a provider call fails, the application reports an error; it never switches modes automatically.
+
+#### Optional local LLM with Ollama
+
+The local LLM path keeps embeddings and SQLite in the application and sends only retrieved, owner-scoped context plus the question to a local Ollama runtime. It does not send prompts to OpenAI or another cloud provider. The RAG pipeline checks citation IDs in application code; this cannot prove every generated claim is entailed by a source. The model is instructed to ignore instructions inside documents and abstain when evidence is missing. Local models can still hallucinate.
+
+Hardware detected for this development machine: Intel Core i7-1355U (10 cores/12 threads), 15.69 GB RAM, Intel Iris Xe integrated graphics with dedicated VRAM not reported, and about 257 GB free on C: after testing. This is entry-level AI capable. Ollama 0.40.16 and `qwen3.5:2b-q4_K_M` (1,945,781,358 bytes, about 1.95 GB) were verified. The model ran on CPU; GPU acceleration was not used or verified. Free RAM was 5.76 GB before loading, about 3.9 GB while the model runner used about 1.95 GB, and 5.90 GB after unloading it. The live test answered a short fictional policy question in 3.47 seconds and abstained on an unsupported one in 4.96 seconds. These are small functional checks, not a performance benchmark. Memory and response time vary with context and other running applications.
+
+Install Ollama for Windows from its official installer, then in PowerShell:
+
+```powershell
+ollama pull qwen3.5:2b-q4_K_M
+ollama list
+```
+
+Set these values in `.env` to use local embeddings and local generated answers:
+
+```dotenv
+AI_MODE=local
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3.5:2b-q4_K_M
+OLLAMA_THINK=false
+```
+
+Start Ollama, then start the API as described below. The runtime and model were not installed or downloaded as part of this change. To return to the no-runtime local workflow, set `LLM_PROVIDER=extractive`. To use OpenAI embeddings and chat explicitly, set `AI_MODE=openai`, `LLM_PROVIDER=openai`, and configure `OPENAI_API_KEY`; this may incur charges. No automatic fallback occurs if Ollama is unavailable; the API returns a controlled provider error, and you can select extractive mode yourself.
+
+Ollama's default local API is `http://127.0.0.1:11434`. Direct host runs use that address. In Docker, Compose defaults to `http://host.docker.internal:11434`, but host reachability, firewall policy, and runtime listener configuration must be verified for the specific machine. Do not expose the Ollama listener on an untrusted network. Docker/local-runtime connectivity has not been tested here.
 
 ## Run locally
 
@@ -247,6 +283,6 @@ SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. 
 - SQLite similarity search scans all stored vectors; migrate to pgvector for larger corpora or concurrent workloads.
 - Authentication and document ownership are implemented, but this remains a local demonstration service. Rate limits are process-local; there is no administrator web interface or malware scanning. Do not expose it publicly with sensitive data without a deployment-specific security review.
 - Text-only PDFs are supported; OCR, Office documents, and HTML are not.
-- OpenAI mode is instructed to stay within context, but generated prose is probabilistic. Local mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
+- OpenAI and Ollama generated prose is probabilistic and may hallucinate despite grounding instructions. Extractive mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
 - No job queue, streaming answers, feedback capture, workflow actions, or frontend is included.
 - Consider shared rate limiting, malware scanning, OCR, PostgreSQL with pgvector, background ingestion, and retrieval-quality monitoring before production use.

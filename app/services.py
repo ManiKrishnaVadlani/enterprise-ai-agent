@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from app.config import Settings
 from app.document_service import DocumentService
 from app.embeddings import LocalEmbeddingProvider, OpenAIEmbeddingProvider
-from app.llm import ExtractiveAnswerProvider, OpenAILanguageModel
+from app.llm import ExtractiveAnswerProvider, OllamaLanguageModel, OpenAILanguageModel
 from app.rag import RAGPipeline
 from app.vector_store import SQLiteVectorStore
 
@@ -20,16 +20,30 @@ class ApplicationServices:
 def build_services(settings: Settings) -> ApplicationServices:
     if settings.ai_mode == "local":
         embeddings = LocalEmbeddingProvider()
-        language_model = ExtractiveAnswerProvider()
         embedding_model_id = embeddings.model_id
     else:
         embeddings = OpenAIEmbeddingProvider(
             settings.openai_api_key, settings.embedding_model
         )
+        embedding_model_id = settings.embedding_model
+
+    if settings.llm_provider == "extractive":
+        language_model = ExtractiveAnswerProvider()
+    elif settings.llm_provider == "ollama":
+        language_model = OllamaLanguageModel(
+            settings.ollama_base_url,
+            settings.ollama_model,
+            timeout_seconds=settings.ollama_timeout_seconds,
+            temperature=settings.ollama_temperature,
+            think=settings.ollama_think,
+            num_predict=settings.ollama_num_predict,
+            context_length=settings.ollama_context_length,
+            max_prompt_chars=settings.ollama_max_prompt_chars,
+        )
+    else:
         language_model = OpenAILanguageModel(
             settings.openai_api_key, settings.chat_model
         )
-        embedding_model_id = settings.embedding_model
 
     store = SQLiteVectorStore(
         settings.database_path, embedding_model=embedding_model_id

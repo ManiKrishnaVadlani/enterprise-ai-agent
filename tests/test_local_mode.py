@@ -28,6 +28,7 @@ def test_local_mode_runs_upload_retrieval_citations_and_delete_without_openai(
     monkeypatch.setattr(builtins, "__import__", reject_openai_import)
     settings = Settings(
         ai_mode="local",
+        llm_provider="extractive",
         openai_api_key=None,
         database_path=tmp_path / "local-demo.db",
         chunk_size=500,

@@ -130,7 +130,7 @@ The project needs a complete local RAG path that can be demonstrated without cre
 
 ### Decision
 
-`AI_MODE=local` is the default. `LocalEmbeddingProvider` creates normalized fixed-size vectors from hashed word and adjacent-word features using the standard library. `ExtractiveAnswerProvider` selects up to three sentences only when each covers at least half of the question's meaningful terms, ranks the candidates by coverage and sentence precision, then appends source labels.
+`AI_MODE=local` is the default for embeddings. `LocalEmbeddingProvider` creates normalized fixed-size vectors from hashed word and adjacent-word features using the standard library. The default `LLM_PROVIDER=extractive` selects up to three sentences only when each covers at least half of the question's meaningful terms, ranks the candidates by coverage and sentence precision, then appends source labels. `LLM_PROVIDER=ollama` can instead select local generated answers while retaining the same local embeddings and RAG pipeline.
 
 ### Reasoning
 
@@ -140,7 +140,7 @@ These providers run within the application and require no model download or Open
 
 - The end-to-end demo works without an API key or paid provider call.
 - Embeddings are deterministic for the same text and implementation version.
-- Answers are copied from retrieved sentences rather than composed as new prose.
+- Extractive answers are copied from retrieved sentences rather than composed as new prose.
 - No additional ML package or model artifact is needed.
 
 ### Trade-offs
@@ -152,7 +152,7 @@ These providers run within the application and require no model download or Open
 
 ### Alternatives considered
 
-OpenAI-backed embeddings and chat are implemented as an opt-in mode. Downloaded local embedding models or other local language models are general alternatives, but they would add model files, runtime requirements, or dependencies and are not implemented here.
+OpenAI-backed embeddings and chat are implemented as an opt-in mode. Ollama-backed answer generation is implemented separately in section 13, but its runtime and model are not bundled or required by tests. Downloaded local embedding models remain a future alternative; they would add model files and require re-embedding.
 
 ## 6. Optional OpenAI embedding and chat providers
 
@@ -162,7 +162,7 @@ The local demo is intentionally lightweight, while the application also needs a 
 
 ### Decision
 
-`AI_MODE=openai` wires `OpenAIEmbeddingProvider` and `OpenAILanguageModel` into the same ingestion and RAG services. It uses the configured embedding and chat model names and requires `OPENAI_API_KEY` when making provider requests.
+`AI_MODE=openai` selects `OpenAIEmbeddingProvider`; the compatibility default for `LLM_PROVIDER` in that mode selects `OpenAILanguageModel`. The answer provider can also be selected independently. Both use configured model names and require `OPENAI_API_KEY` when their requests are made.
 
 ### Reasoning
 
@@ -192,11 +192,11 @@ The ingestion and RAG flows need to work with different embedding and answer imp
 
 ### Decision
 
-`EmbeddingProvider` and `LanguageModelProvider` are Python protocols. `build_services()` chooses concrete providers according to `Settings.ai_mode`; `DocumentService` and `RAGPipeline` receive those providers through constructor injection.
+`EmbeddingProvider` and `LanguageModelProvider` are Python protocols. `build_services()` chooses the embedding provider from `Settings.ai_mode` and the answer provider from `Settings.llm_provider`; `DocumentService` and `RAGPipeline` receive providers through constructor injection.
 
 ### Reasoning
 
-Both local and OpenAI implementations satisfy the same small method contracts. Tests can inject fakes or select a provider directly without changing route code or the storage workflow.
+Extractive, Ollama, and OpenAI implementations satisfy the same small method contracts. Tests can inject fakes or select a provider directly without changing route code or the storage workflow.
 
 ### Advantages
 
@@ -372,7 +372,40 @@ The baseline smoke corpus demonstrated a false positive: the unrelated question 
 
 Increasing one global threshold was not selected because provider score distributions are not assumed equivalent and the observed local sample is too small to justify a universal cutoff. A trained reranker or semantic local model would add model/runtime complexity and is not implemented.
 
-## 13. Current trade-offs, limitations, and future alternatives
+## 13. Optional local LLM provider with Ollama
+
+### Context/problem
+
+The extractive provider is fully local and predictable, but cannot compose an answer across passages. The project wanted an optional generated answer path without requiring paid APIs or changing retrieval, ownership, and citation behavior.
+
+### Decision
+
+`OllamaLanguageModel` implements the existing `LanguageModelProvider` interface and uses Python's standard-library `urllib` to send non-streaming requests to a local Ollama `/api/chat` endpoint. `LLM_PROVIDER=ollama` selects it independently from `AI_MODE`, so local feature-hash embeddings remain in use when `AI_MODE=local`. It sends only the question and already owner-filtered retrieved context. There is no automatic fallback to OpenAI or extractive mode; an unavailable runtime produces a controlled provider error.
+
+### Reasoning
+
+The existing provider contract lets the API and RAG pipeline stay unchanged. Ollama offers a local HTTP interface and avoids an additional Python package. A finite request timeout, output-token and context limits, bounded prompt and response sizes, safe error mapping, disabled proxy handling, rejected redirects, and one non-queuing inference slot constrain resource use and keep prompts on the configured local endpoint. `OLLAMA_THINK` defaults to false because the selected Qwen model can spend a small output allowance in its separate reasoning field and leave answer content empty. The shared prompt marks retrieved passages as untrusted and asks for context-grounded answers and citations. Citation numbers are still checked in application code by the RAG pipeline.
+
+### Advantages
+
+- Model inference can remain on the same computer, with no OpenAI call.
+- Existing authentication, user-scoped retrieval, source labels, and answer validation remain in the application path.
+- Mocked provider tests do not need a runtime, model download, network, GPU, or API credentials.
+- Runtime failures do not silently change which provider generated an answer.
+
+### Trade-offs
+
+- Ollama and a model must be installed separately; model weights are not included with the project.
+- The verified Qwen3.5 2B Q4_K_M model is 1,945,781,358 bytes (about 1.95 GB). In the live check, the runner used about 1.95 GB and inference ran on CPU; available RAM moved from 5.76 GB before loading to about 3.9 GB while loaded. The model was unloaded after testing. A short answer took 3.47 seconds and an unsupported question took 4.96 seconds; these are functional samples, not a performance benchmark.
+- The local provider and API workflow were live-tested with fictional text. Intel GPU acceleration and Docker-to-host runtime connectivity remain unverified.
+- Prompt instructions and valid source IDs cannot prove semantic support or eliminate hallucinations. Feature-hash retrieval may miss relevant passages before generation.
+- This optional runtime path is not part of the default extractive local demo and is not a production capacity guarantee.
+
+### Alternatives considered
+
+Keeping extractive-only mode is still the simplest no-runtime option. llama.cpp is a general alternative local server; this repository uses Ollama's HTTP API for simpler runtime/model management. No live benchmark between runtimes or models was performed.
+
+## 14. Current trade-offs, limitations, and future alternatives
 
 ### Context/problem
 

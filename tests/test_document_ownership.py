@@ -19,6 +19,7 @@ pytestmark = pytest.mark.http
 def _application(tmp_path):
     settings = Settings(
         ai_mode="local",
+        llm_provider="extractive",
         database_path=tmp_path / "ownership.db",
         min_relevance_score=0.15,
     )

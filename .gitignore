@@ -17,6 +17,9 @@ htmlcov/
 .env.*
 !.env.example
 data/
+*.gguf
+.ollama/
+ollama-models/
 
 # Editor and operating-system files
 .vscode/

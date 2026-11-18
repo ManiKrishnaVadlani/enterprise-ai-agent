@@ -118,7 +118,7 @@ The store verifies that vectors are finite, non-empty, consistent in dimension, 
 
 For `POST /ask`, the route resolves the bearer token to an active user, validates and trims the question, and passes the user ID to `RAGPipeline.answer()`. The pipeline validates an optional document ID against that owner, embeds the question, searches with owner and score filters, and keeps at most the top-k results above threshold. A missing or non-owned specific document returns the same 404. If no suitable results remain, it returns the shared no-information response without invoking an answer provider.
 
-For remaining results, the pipeline formats context blocks with source labels and chunk text. It passes that context and the question to the configured `LanguageModelProvider`. The shared no-information response produces no citations. Otherwise, the pipeline resolves source labels used in the answer to structured metadata and returns only those citations.
+For remaining results, the pipeline formats context blocks with source labels and chunk text. It passes that context and the question to the configured `LanguageModelProvider`. The shared no-information response produces no citations. Otherwise, the pipeline resolves source labels used in the answer to structured metadata and returns only those citations. Provider failures are mapped to controlled API errors; the provider does not silently switch to a different model.
 
 ### Local extractive answering
 
@@ -128,22 +128,29 @@ For remaining results, the pipeline formats context blocks with source labels an
 
 `OpenAILanguageModel` sends the question and source-labeled context to the configured OpenAI chat model. Its system instruction treats document text as untrusted reference data, requests an answer based only on supplied context, asks for citations for supported claims, and directs the model to return the shared abstention text exactly when evidence is insufficient. The response is generated prose and may be probabilistic; the instruction cannot guarantee correctness.
 
+### Ollama local LLM answering
+
+`OllamaLanguageModel` implements the same `LanguageModelProvider` interface and posts a non-streaming chat request to the configured local Ollama `/api/chat` endpoint using Python's standard-library HTTP client. Its transport ignores environment proxy settings and rejects redirects so prompts stay with the configured local runtime. The payload contains the untrusted retrieved context and question, the selected model, a timeout, context-window and output-token limits, temperature, and the `think` option. Thinking is off by default: some models return reasoning in a separate field, which can consume the output budget without returning answer content. Inputs over `OLLAMA_MAX_PROMPT_CHARS` are rejected before transmission. A single non-queuing inference slot prevents concurrent local generations from accumulating in an unbounded wait queue. Connection, timeout, missing-model, HTTP, malformed-response, and empty-answer cases become safe provider errors without including prompt text or runtime response bodies.
+
+The shared system instruction treats passages as data, disallows following embedded instructions, requires context-only answers and source labels, and asks for the standard abstention text when evidence is insufficient. The application still validates citation numbers and maps them only to chunks retrieved for the authenticated owner. This validates source references, not semantic entailment. No runtime/model is bundled or automatically installed.
+
 ## 9. Source attribution
 
-Before answer generation, `RAGPipeline` labels each retrieved chunk as `[Source N: filename]`, adding a page number for PDF chunks. The local provider places these labels directly after selected sentences. The OpenAI provider receives the labels in its context and is instructed to cite them in its answer.
+Before answer generation, `RAGPipeline` labels each retrieved chunk as `[Source N: filename]`, adding a page number for PDF chunks. The extractive provider places these labels directly after selected sentences. The OpenAI and Ollama providers receive the labels in context and are instructed to cite them in their answers.
 
 The pipeline maps source numbers cited in the answer back to retrieved chunks and returns only those chunks in the `sources` array. An answer with no valid source references is replaced by the shared no-information response and an empty source list. This ensures cited labels refer to supplied context, but cannot prove generated prose is semantically supported by a citation. If there is no relevant context or sufficient local sentence evidence, the sources array is empty.
 
 ## 10. Local mode and OpenAI mode
 
-`AI_MODE` is validated as either `local` or `openai` and defaults to `local`. `build_services()` selects the embedding and answer providers together, so ingestion and queries use the same mode. Local mode does not require OpenAI credentials and does not fall back to OpenAI when local processing fails.
+`AI_MODE` is validated as either `local` or `openai` and defaults to `local`. It selects the embedding provider and database path. `LLM_PROVIDER` separately selects `extractive`, `ollama`, or `openai`. If it is unset, its compatibility default is extractive for local mode and OpenAI for OpenAI mode. This lets local embeddings be paired with Ollama answers without an OpenAI key, while preserving the earlier modes. There is no automatic provider fallback.
 
 | Mode | Embeddings | Answering | Credentials and network |
 | --- | --- | --- | --- |
-| `local` | Deterministic feature hashing in the application process | Selects matching sentences from retrieved chunks | No OpenAI key or OpenAI request required |
-| `openai` | OpenAI embedding API | OpenAI chat completion API | Requires `OPENAI_API_KEY`; requests may incur charges |
+| `AI_MODE=local`, `LLM_PROVIDER=extractive` (default) | Deterministic feature hashing in the application process | Selects matching sentences from retrieved chunks | No OpenAI key or request; no separate runtime |
+| `AI_MODE=local`, `LLM_PROVIDER=ollama` | Deterministic feature hashing in the application process | Local Ollama chat API with retrieved context | No OpenAI request; Ollama runtime and model must be installed separately |
+| `AI_MODE=openai`, `LLM_PROVIDER=openai` (legacy default) | OpenAI embedding API | OpenAI chat completion API | Requires `OPENAI_API_KEY`; requests may incur charges |
 
-The OpenAI SDK is imported inside provider client creation, not at application module import. The configured mode determines which providers are wired into the services.
+The OpenAI SDK is imported inside provider client creation, not at application module import. The Ollama adapter uses `urllib` and adds no package dependency. The configured modes determine which providers are wired into the services.
 
 ## 11. API request flow
 
@@ -172,7 +179,7 @@ The Dockerfile uses `python:3.14-slim`, installs `requirements.txt`, copies the 
 ## 13. Important limitations
 
 - Local embeddings use hashed lexical features, not a semantic model. Related terms with different wording may not retrieve well.
-- Local answer generation selects sentences with sufficient lexical question-term coverage; it does not synthesize, paraphrase, or reason like a language model.
+- Extractive answer generation selects sentences with sufficient lexical question-term coverage; it does not synthesize, paraphrase, or reason like a language model. Ollama generation is probabilistic and can hallucinate.
 - SQLite search calculates cosine similarity by scanning vectors in Python. It is intended for a small corpus, not large-scale or high-concurrency workloads.
 - TXT files must be UTF-8. PDFs must contain extractable text; OCR, Office formats, and HTML are not supported.
 - The upload endpoint expects raw bytes, not `multipart/form-data`, and buffers the request up to the configured size limit.

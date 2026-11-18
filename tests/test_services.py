@@ -6,7 +6,12 @@ from app.services import build_services
 
 def test_service_builder_uses_local_providers_by_explicit_mode_without_a_key(tmp_path):
     services = build_services(
-        Settings(ai_mode="local", openai_api_key=None, database_path=tmp_path / "local.db")
+        Settings(
+            ai_mode="local",
+            llm_provider="extractive",
+            openai_api_key=None,
+            database_path=tmp_path / "local.db",
+        )
     )
 
     assert isinstance(services.documents.embeddings, LocalEmbeddingProvider)
@@ -19,6 +24,7 @@ def test_service_builder_preserves_openai_providers_as_an_opt_in_mode(tmp_path):
     services = build_services(
         Settings(
             ai_mode="openai",
+            llm_provider="openai",
             openai_api_key=None,
             database_path=tmp_path / "openai.db",
         )
@@ -40,6 +46,7 @@ def test_service_builder_uses_provider_specific_relevance_thresholds(tmp_path):
     openai = build_services(
         Settings(
             ai_mode="openai",
+            llm_provider="openai",
             openai_min_relevance_score=0.36,
             database_path=tmp_path / "openai.db",
         )

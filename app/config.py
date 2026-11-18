@@ -11,6 +11,11 @@ load_dotenv()
 
 APP_NAME = os.getenv("APP_NAME", "Enterprise AI Knowledge & Workflow Agent")
 _DEFAULT_AI_MODE = os.getenv("AI_MODE", "local").strip().lower()
+_DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").strip().lower()
+_OLLAMA_THINK_ENV = os.getenv("OLLAMA_THINK", "false").strip().lower()
+if _OLLAMA_THINK_ENV not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+    raise ValueError("OLLAMA_THINK must be a boolean value.")
+_DEFAULT_OLLAMA_THINK = _OLLAMA_THINK_ENV in {"true", "1", "yes", "on"}
 _DEFAULT_DATABASE_PATH = os.getenv(
     "LOCAL_DATABASE_PATH" if _DEFAULT_AI_MODE == "local" else "DATABASE_PATH",
     "data/knowledge-local.db" if _DEFAULT_AI_MODE == "local" else "data/knowledge.db",
@@ -24,6 +29,15 @@ class Settings:
     app_name: str = APP_NAME
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     ai_mode: str = _DEFAULT_AI_MODE
+    llm_provider: str = _DEFAULT_LLM_PROVIDER
+    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen3.5:2b-q4_K_M")
+    ollama_timeout_seconds: float = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+    ollama_temperature: float = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
+    ollama_think: bool = _DEFAULT_OLLAMA_THINK
+    ollama_num_predict: int = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+    ollama_context_length: int = int(os.getenv("OLLAMA_CONTEXT_LENGTH", "4096"))
+    ollama_max_prompt_chars: int = int(os.getenv("OLLAMA_MAX_PROMPT_CHARS", "12000"))
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     chat_model: str = os.getenv("CHAT_MODEL", "gpt-4.1-mini")
@@ -66,10 +80,57 @@ class Settings:
     def __post_init__(self) -> None:
         normalized_mode = self.ai_mode.strip().lower()
         object.__setattr__(self, "ai_mode", normalized_mode)
+        llm_provider = self.llm_provider.strip().lower()
+        if not llm_provider:
+            llm_provider = "openai" if normalized_mode == "openai" else "extractive"
+        object.__setattr__(self, "llm_provider", llm_provider)
         normalized_log_level = self.log_level.strip().upper()
         object.__setattr__(self, "log_level", normalized_log_level)
         if self.ai_mode not in {"local", "openai"}:
             raise ValueError("AI_MODE must be either 'local' or 'openai'.")
+        if llm_provider not in {"extractive", "ollama", "openai"}:
+            raise ValueError("LLM_PROVIDER must be extractive, ollama, or openai.")
+        if not self.ollama_model.strip() or any(c in self.ollama_model for c in "\r\n"):
+            raise ValueError("OLLAMA_MODEL must be a non-empty model name.")
+        if (
+            not math.isfinite(self.ollama_timeout_seconds)
+            or self.ollama_timeout_seconds <= 0
+        ):
+            raise ValueError("OLLAMA_TIMEOUT_SECONDS must be positive and finite.")
+        if (
+            not math.isfinite(self.ollama_temperature)
+            or not 0 <= self.ollama_temperature <= 2
+        ):
+            raise ValueError("OLLAMA_TEMPERATURE must be between 0 and 2.")
+        if not 1 <= self.ollama_num_predict <= 4096:
+            raise ValueError("OLLAMA_NUM_PREDICT must be between 1 and 4096.")
+        if not 512 <= self.ollama_context_length <= 32768:
+            raise ValueError("OLLAMA_CONTEXT_LENGTH must be between 512 and 32768.")
+        if not 1 <= self.ollama_max_prompt_chars <= 100000:
+            raise ValueError("OLLAMA_MAX_PROMPT_CHARS must be between 1 and 100000.")
+        if not isinstance(self.ollama_think, bool):
+            raise ValueError("OLLAMA_THINK must be a boolean value.")
+        parsed_runtime = urlsplit(self.ollama_base_url)
+        try:
+            runtime_port = parsed_runtime.port
+        except ValueError as error:
+            raise ValueError("OLLAMA_BASE_URL must be a valid local HTTP URL.") from error
+        if (
+            parsed_runtime.scheme != "http"
+            or (
+                parsed_runtime.hostname
+                not in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+            )
+            or parsed_runtime.username is not None
+            or parsed_runtime.password is not None
+            or parsed_runtime.query
+            or parsed_runtime.fragment
+            or parsed_runtime.path not in {"", "/"}
+            or (runtime_port is not None and not 1 <= runtime_port <= 65535)
+        ):
+            raise ValueError(
+                "OLLAMA_BASE_URL must use HTTP and a loopback or Docker host name."
+            )
         if normalized_log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL.")
         if self.chunk_size < 1:
