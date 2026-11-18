@@ -130,7 +130,7 @@ The project needs a complete local RAG path that can be demonstrated without cre
 
 ### Decision
 
-`AI_MODE=local` is the default. `LocalEmbeddingProvider` creates normalized fixed-size vectors from hashed word and adjacent-word features using the standard library. `ExtractiveAnswerProvider` selects up to three sentences from retrieved context when their content words overlap the question, then appends source labels.
+`AI_MODE=local` is the default. `LocalEmbeddingProvider` creates normalized fixed-size vectors from hashed word and adjacent-word features using the standard library. `ExtractiveAnswerProvider` selects up to three sentences only when each covers at least half of the question's meaningful terms, ranks the candidates by coverage and sentence precision, then appends source labels.
 
 ### Reasoning
 
@@ -339,7 +339,40 @@ The design uses the existing SQLite and FastAPI dependency patterns without addi
 
 External identity providers and public registration are not implemented. They are general alternatives, not approaches formally evaluated by the repository.
 
-## 12. Current trade-offs, limitations, and future alternatives
+## 12. Retrieval relevance, extractive abstention, and citations
+
+### Context/problem
+
+Cosine similarity returns relative rankings, but a top result may still be unrelated. Local feature-hash scores and hosted embedding scores need not share a useful cutoff. A returned citation list should also not imply that every retrieved passage was used in the answer.
+
+### Decision
+
+The existing `MIN_RELEVANCE_SCORE` remains the shared fallback. Optional `LOCAL_MIN_RELEVANCE_SCORE` and `OPENAI_MIN_RELEVANCE_SCORE` overrides allow separate tuning. `SQLiteVectorStore.search()` applies the minimum score to all owner- and document-scoped candidates before sorting and truncating to top-k. The local answer provider requires at least half of the question's meaningful terms to occur in a sentence. The RAG pipeline includes only source numbers referenced in the final answer; if references are absent or invalid, it returns the common no-information response with no sources. Both no-information paths use the same response text.
+
+### Reasoning
+
+The baseline smoke corpus demonstrated a false positive: the unrelated question “When is cafeteria access reviewed?” scored 0.3086 against the security passage, above the then-current 0.15 cutoff. Raising a shared cutoff based on this small local sample would be arbitrary and could reject relevant passages, especially for a different provider. Provider-specific overrides and a sentence-level evidence rule address different parts of the problem without claiming semantic understanding. Filtering before top-k lets lower-ranked above-threshold candidates remain eligible.
+
+### Advantages
+
+- Existing configuration remains the fallback, while providers can be calibrated separately.
+- Low-scoring top results no longer consume top-k slots ahead of eligible passages.
+- Local answers are copied from sentences with meaningful question-term coverage and retain source labels.
+- The returned source metadata points only to labels cited by the answer.
+- No additional dependency, model download, or API request is required for local evaluation.
+
+### Trade-offs
+
+- A small smoke dataset is not enough to establish production thresholds; operators should evaluate representative questions for their own corpus and embedding model.
+- Term coverage can reject useful paraphrases and can still accept a coincidental match; it is not semantic verification.
+- Valid source labels prove that a citation refers to supplied context, not that an LLM claim is entailed by that passage.
+- The store still computes cosine scores for every eligible vector in Python.
+
+### Alternatives considered
+
+Increasing one global threshold was not selected because provider score distributions are not assumed equivalent and the observed local sample is too small to justify a universal cutoff. A trained reranker or semantic local model would add model/runtime complexity and is not implemented.
+
+## 13. Current trade-offs, limitations, and future alternatives
 
 ### Context/problem
 

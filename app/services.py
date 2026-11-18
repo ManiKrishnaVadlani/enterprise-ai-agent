@@ -50,6 +50,6 @@ def build_services(settings: Settings) -> ApplicationServices:
             embeddings=embeddings,
             language_model=language_model,
             top_k=settings.top_k,
-            min_relevance_score=settings.min_relevance_score,
+            min_relevance_score=settings.relevance_threshold_for(settings.ai_mode),
         ),
     )

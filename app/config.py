@@ -32,6 +32,16 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "150"))
     top_k: int = int(os.getenv("TOP_K", "4"))
     min_relevance_score: float = float(os.getenv("MIN_RELEVANCE_SCORE", "0.15"))
+    local_min_relevance_score: float | None = (
+        float(os.environ["LOCAL_MIN_RELEVANCE_SCORE"])
+        if "LOCAL_MIN_RELEVANCE_SCORE" in os.environ
+        else None
+    )
+    openai_min_relevance_score: float | None = (
+        float(os.environ["OPENAI_MIN_RELEVANCE_SCORE"])
+        if "OPENAI_MIN_RELEVANCE_SCORE" in os.environ
+        else None
+    )
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     max_concurrent_uploads: int = int(os.getenv("MAX_CONCURRENT_UPLOADS", "2"))
     upload_wait_timeout_seconds: float = float(
@@ -90,6 +100,14 @@ class Settings:
             raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be positive and finite")
         if not math.isfinite(self.min_relevance_score) or not 0 <= self.min_relevance_score <= 1:
             raise ValueError("MIN_RELEVANCE_SCORE must be between 0 and 1")
+        for name, threshold in (
+            ("LOCAL_MIN_RELEVANCE_SCORE", self.local_min_relevance_score),
+            ("OPENAI_MIN_RELEVANCE_SCORE", self.openai_min_relevance_score),
+        ):
+            if threshold is not None and (
+                not math.isfinite(threshold) or not 0 <= threshold <= 1
+            ):
+                raise ValueError(f"{name} must be between 0 and 1")
         for origin in self.allowed_origins:
             parsed = urlsplit(origin)
             if (
@@ -105,3 +123,11 @@ class Settings:
                 raise ValueError(
                     "CORS_ALLOWED_ORIGINS must contain explicit HTTP(S) origins without paths."
                 )
+
+    def relevance_threshold_for(self, ai_mode: str) -> float:
+        """Return a provider-specific override or the legacy shared setting."""
+        if ai_mode == "local" and self.local_min_relevance_score is not None:
+            return self.local_min_relevance_score
+        if ai_mode == "openai" and self.openai_min_relevance_score is not None:
+            return self.openai_min_relevance_score
+        return self.min_relevance_score

@@ -55,6 +55,33 @@ def test_store_filters_search_by_document_id(tmp_path):
     assert [result.chunk.document_id for result in results] == ["doc-a"]
 
 
+def test_store_applies_minimum_score_before_top_k(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "score-filter.db")
+    store.add_document(
+        "doc-low",
+        "lower-score.txt",
+        [_chunk("doc-low", "chunk-low", "lower-score.txt", "below threshold")],
+        [[0.6, 0.8]],
+    )
+    store.add_document(
+        "doc-high",
+        "higher-score.txt",
+        [_chunk("doc-high", "chunk-high", "higher-score.txt", "above threshold")],
+        [[0.8, 0.6]],
+    )
+
+    results = store.search([1.0, 0.0], top_k=1, min_score=0.7)
+
+    assert [result.chunk.document_id for result in results] == ["doc-high"]
+    assert results[0].score == pytest.approx(0.8)
+
+
+def test_store_rejects_invalid_minimum_score(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "score-validation.db")
+    with pytest.raises(ValueError, match="min_score"):
+        store.search([1.0, 0.0], top_k=1, min_score=float("nan"))
+
+
 def test_store_lists_chunk_counts_and_deletes_document_chunks(tmp_path):
     store = SQLiteVectorStore(tmp_path / "vectors.db")
     store.add_document(

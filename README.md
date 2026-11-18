@@ -109,7 +109,9 @@ With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI creden
 | `CHUNK_SIZE` | `1000` | Approximate maximum characters per chunk |
 | `CHUNK_OVERLAP` | `150` | Character overlap between chunks |
 | `TOP_K` | `4` | Maximum retrieved passages (1–20) |
-| `MIN_RELEVANCE_SCORE` | `0.15` | Minimum cosine score included in context (0–1) |
+| `MIN_RELEVANCE_SCORE` | `0.15` | Shared fallback minimum cosine score (0–1) |
+| `LOCAL_MIN_RELEVANCE_SCORE` | unset | Optional local provider override; tune with local evaluation cases |
+| `OPENAI_MIN_RELEVANCE_SCORE` | unset | Optional OpenAI provider override; tune separately for that model |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum upload size (10 MiB) |
 | `MAX_CONCURRENT_UPLOADS` | `2` | Concurrent ingestion limit per process |
 | `UPLOAD_WAIT_TIMEOUT_SECONDS` | `5` | Maximum wait for an upload slot |
@@ -131,7 +133,9 @@ Local mode has its own database file so it will not mix local vectors with an ex
 
 `AI_MODE=local` is the default. Its embedding provider hashes normalized word and adjacent-word features into a fixed-size vector using only the Python standard library. The result is deterministic and searchable by cosine similarity, but it is a lightweight keyword-feature approximation: it does not understand meaning, synonyms, or context like a trained embedding model. Hash collisions are possible.
 
-The local answer provider selects up to three sentences from retrieved chunks when their content words overlap the question. It appends the source label to each selected sentence and returns a no-information message when there is no word overlap. It does not paraphrase or synthesize new claims and is not equivalent to an LLM.
+The local answer provider selects up to three sentences from retrieved chunks. A sentence must cover at least half of the question's meaningful terms; candidates are ranked by question coverage and sentence precision. It appends each selected sentence's source label and abstains with the shared no-information response when evidence is insufficient. This is still lexical matching: it does not understand meaning, paraphrase, or synthesize claims, and is not equivalent to an LLM.
+
+Retrieval applies the configured minimum score to all owner- and document-scoped candidates before taking the top-k passages. Local feature-hash and OpenAI embedding scores can have different distributions, so `LOCAL_MIN_RELEVANCE_SCORE` and `OPENAI_MIN_RELEVANCE_SCORE` can override the shared fallback independently. The repository's small evaluation set is a regression smoke test, not a universal score calibration dataset.
 
 To use OpenAI later, set `AI_MODE=openai` and provide `OPENAI_API_KEY`. This explicitly enables live embedding and chat requests, which may incur charges. If a provider call fails, the application reports an error; it never switches modes automatically.
 
@@ -186,7 +190,7 @@ curl.exe -X POST "http://127.0.0.1:8000/ask" `
   -d '{"question":"What does the handbook say about access reviews?"}'
 ```
 
-The answer response includes `question`, `answer`, and `sources`. Each source has a document ID, original filename, chunk ID, optional PDF page number, and relevance score. You can scope retrieval with `{"question":"...","document_id":"..."}`.
+The answer response includes `question`, `answer`, and `sources`. Each source has a document ID, original filename, chunk ID, optional PDF page number, and relevance score. Sources correspond only to source labels cited by the returned answer. Missing or invalid source references produce the no-information response with an empty source list. You can scope retrieval with `{"question":"...","document_id":"..."}`.
 
 List indexed documents and delete a document with:
 
@@ -210,6 +214,14 @@ python -m pytest -p no:cacheprovider -m "not http"
 ```
 
 The HTTP tests remain enabled in the complete suite and CI. A passing non-HTTP run does not replace running the HTTP tests in an environment where the Windows event loop can initialize.
+
+Run the deterministic local RAG quality smoke set independently with:
+
+```powershell
+python -m pytest -p no:cacheprovider tests/test_rag_evaluation.py
+```
+
+It uses the local embedding and extractive providers only; it does not call OpenAI or require API credits.
 
 ## Docker deployment
 

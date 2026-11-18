@@ -112,27 +112,27 @@ The `EmbeddingProvider` interface accepts a list of strings and returns one vect
 
 The store verifies that vectors are finite, non-empty, consistent in dimension, and compatible with the metadata in the database. It rejects a different embedding model when the database already has vectors. SQLite connections enable foreign keys, use a 10-second busy timeout, and close after each operation; writes run within transaction contexts. New POSIX database files use mode `0600`. A versioned migration preserves existing documents with `owner_id=NULL` rather than assigning them arbitrarily.
 
-`search()` optionally filters chunks by document ID and owner ID, computes cosine similarity in Python, sorts matches by score, and returns up to `TOP_K` results. Owner filtering happens in SQL, not after result retrieval. This scans selected stored vectors rather than using a dedicated vector index, so search cost grows with the number of chunks. `RAGPipeline` then removes results below `MIN_RELEVANCE_SCORE`.
+`search()` filters chunks by optional document ID and owner ID in SQL, computes cosine similarity for eligible rows, filters by the configured minimum score, sorts by score, and then returns up to `TOP_K` results. Applying the threshold before top-k prevents below-threshold high ranks from hiding lower-ranked results that meet the cutoff. The store still scores every eligible vector in Python, so search cost grows linearly with the corpus. `MIN_RELEVANCE_SCORE` is the compatibility fallback; `LOCAL_MIN_RELEVANCE_SCORE` and `OPENAI_MIN_RELEVANCE_SCORE` optionally tune provider-specific score distributions. No single score is assumed to suit all providers or corpora.
 
 ## 8. Question-answering workflow
 
-For `POST /ask`, the route resolves the bearer token to an active user, validates and trims the question, and passes the user ID to `RAGPipeline.answer()`. The pipeline validates an optional document ID against that owner, embeds the question, searches with an owner filter, and drops results below the relevance threshold. A missing or non-owned specific document returns the same 404. If no suitable results remain, it returns the safe no-information response without invoking an answer provider.
+For `POST /ask`, the route resolves the bearer token to an active user, validates and trims the question, and passes the user ID to `RAGPipeline.answer()`. The pipeline validates an optional document ID against that owner, embeds the question, searches with owner and score filters, and keeps at most the top-k results above threshold. A missing or non-owned specific document returns the same 404. If no suitable results remain, it returns the shared no-information response without invoking an answer provider.
 
-For remaining results, the pipeline formats context blocks with source labels and chunk text. It passes that context and the question to the configured `LanguageModelProvider`. If the provider returns its local no-information response, the pipeline returns no citations. Otherwise it returns the answer and structured citation metadata for the retrieved results.
+For remaining results, the pipeline formats context blocks with source labels and chunk text. It passes that context and the question to the configured `LanguageModelProvider`. The shared no-information response produces no citations. Otherwise, the pipeline resolves source labels used in the answer to structured metadata and returns only those citations.
 
 ### Local extractive answering
 
-`ExtractiveAnswerProvider` compares question content words with sentences in the retrieved context. It selects up to three matching sentences and appends each sentence's source label. It copies text from retrieved chunks rather than generating paraphrases or new claims. If there are no matching terms or no valid source-labeled sentences, it returns a no-information message.
+`ExtractiveAnswerProvider` compares question content words with each sentence in retrieved context. A sentence must cover at least half of the question's meaningful terms. Candidates are ranked deterministically by question-term coverage and sentence-term precision; up to three distinct sentences are copied, each with its source label. If no sentence meets the evidence rule, it returns the shared no-information message. This lexical rule reduces incidental overlap but does not provide semantic understanding.
 
 ### OpenAI-powered answering
 
-`OpenAILanguageModel` sends the question and source-labeled context to the configured OpenAI chat model. Its system instruction treats document text as untrusted reference data, requests an answer based only on the supplied context, asks for source-label citations, and directs the model to acknowledge missing evidence. The response is generated prose and may be probabilistic; the instruction cannot guarantee correctness.
+`OpenAILanguageModel` sends the question and source-labeled context to the configured OpenAI chat model. Its system instruction treats document text as untrusted reference data, requests an answer based only on supplied context, asks for citations for supported claims, and directs the model to return the shared abstention text exactly when evidence is insufficient. The response is generated prose and may be probabilistic; the instruction cannot guarantee correctness.
 
 ## 9. Source attribution
 
 Before answer generation, `RAGPipeline` labels each retrieved chunk as `[Source N: filename]`, adding a page number for PDF chunks. The local provider places these labels directly after selected sentences. The OpenAI provider receives the labels in its context and is instructed to cite them in its answer.
 
-The API also returns a `sources` array containing document ID, filename, chunk ID, optional page number, and relevance score for the retrieved chunks. This is structured retrieval metadata; in OpenAI mode it does not independently verify which returned chunks support each generated claim. If the system has no relevant context or the local provider finds no matching sentence, the sources array is empty.
+The pipeline maps source numbers cited in the answer back to retrieved chunks and returns only those chunks in the `sources` array. An answer with no valid source references is replaced by the shared no-information response and an empty source list. This ensures cited labels refer to supplied context, but cannot prove generated prose is semantically supported by a citation. If there is no relevant context or sufficient local sentence evidence, the sources array is empty.
 
 ## 10. Local mode and OpenAI mode
 
@@ -172,7 +172,7 @@ The Dockerfile uses `python:3.14-slim`, installs `requirements.txt`, copies the 
 ## 13. Important limitations
 
 - Local embeddings use hashed lexical features, not a semantic model. Related terms with different wording may not retrieve well.
-- Local answer generation selects overlapping sentences; it does not synthesize, paraphrase, or reason like a language model.
+- Local answer generation selects sentences with sufficient lexical question-term coverage; it does not synthesize, paraphrase, or reason like a language model.
 - SQLite search calculates cosine similarity by scanning vectors in Python. It is intended for a small corpus, not large-scale or high-concurrency workloads.
 - TXT files must be UTF-8. PDFs must contain extractable text; OCR, Office formats, and HTML are not supported.
 - The upload endpoint expects raw bytes, not `multipart/form-data`, and buffers the request up to the configured size limit.

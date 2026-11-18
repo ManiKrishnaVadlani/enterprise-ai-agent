@@ -386,10 +386,15 @@ class SQLiteVectorStore:
         top_k: int,
         document_id: str | None = None,
         owner_id: str | None = None,
+        min_score: float | None = None,
     ) -> list[SearchResult]:
         self._validate_vector(query_vector)
         if top_k < 1:
             raise ValueError("top_k must be positive")
+        if min_score is not None and (
+            not math.isfinite(min_score) or not -1 <= min_score <= 1
+        ):
+            raise ValueError("min_score must be finite and between -1 and 1")
         try:
             with self._session() as connection:
                 conditions: list[str] = []
@@ -429,6 +434,8 @@ class SQLiteVectorStore:
                 ingested_at=datetime.fromisoformat(row["ingested_at"]),
             )
             scored.append(SearchResult(chunk=chunk, score=score))
+        if min_score is not None:
+            scored = [result for result in scored if result.score >= min_score]
         return sorted(scored, key=lambda result: result.score, reverse=True)[:top_k]
 
     @staticmethod

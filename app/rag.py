@@ -1,6 +1,7 @@
 """Retrieve relevant passages and generate answers with source metadata."""
 
 from dataclasses import dataclass
+import re
 
 from app.embeddings import EmbeddingProvider
 from app.errors import DocumentNotFoundError, ProviderError
@@ -10,6 +11,7 @@ from app.vector_store import SQLiteVectorStore
 
 
 NO_DOCUMENTS_ANSWER = "I could not find relevant information in the indexed documents."
+_SOURCE_REFERENCE = re.compile(r"\[Source\s+(\d+)(?=\s*(?::|\]))")
 
 
 @dataclass(frozen=True)
@@ -66,28 +68,46 @@ class RAGPipeline:
             if len(query_vectors) != 1:
                 raise ProviderError("The embedding provider returned no query vector.")
             matches = self.store.search(
-                query_vectors[0], self.top_k, document_id, owner_id
+                query_vectors[0],
+                self.top_k,
+                document_id,
+                owner_id,
+                min_score=self.min_relevance_score,
             )
         except ProviderError:
             raise
 
+        # Keep this guard as well as the store-side filter so alternate store
+        # implementations cannot accidentally send below-threshold passages.
         relevant = [match for match in matches if match.score >= self.min_relevance_score]
         if not relevant:
             return Answer(answer=NO_DOCUMENTS_ANSWER, sources=[])
 
         context = "\n\n".join(self._format_context(index, match) for index, match in enumerate(relevant, 1))
-        generated_answer = self.language_model.generate_answer(question, context)
+        generated_answer = self.language_model.generate_answer(question, context).strip()
         if generated_answer == NO_INFORMATION_ANSWER:
-            return Answer(answer=generated_answer, sources=[])
+            return Answer(answer=NO_INFORMATION_ANSWER, sources=[])
+
+        # Source numbers are the stable provider-facing references. Return only
+        # the chunks the answer actually cites, and abstain if references are
+        # missing or point outside the supplied evidence.
+        source_numbers = list(dict.fromkeys(
+            int(number) for number in _SOURCE_REFERENCE.findall(generated_answer)
+        ))
+        if not source_numbers or any(
+            number < 1 or number > len(relevant) for number in source_numbers
+        ):
+            return Answer(answer=NO_INFORMATION_ANSWER, sources=[])
+
         citations = [
             Citation(
-                document_id=match.chunk.document_id,
-                filename=match.chunk.filename,
-                chunk_id=match.chunk.chunk_id,
-                page_number=match.chunk.page_number,
-                relevance_score=round(match.score, 4),
+                document_id=relevant[number - 1].chunk.document_id,
+                filename=relevant[number - 1].chunk.filename,
+                chunk_id=relevant[number - 1].chunk.chunk_id,
+                page_number=relevant[number - 1].chunk.page_number,
+                relevance_score=round(relevant[number - 1].score, 4),
             )
-            for match in relevant
+            for number in source_numbers
         ]
         return Answer(answer=generated_answer, sources=citations)
 

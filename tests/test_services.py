@@ -27,3 +27,23 @@ def test_service_builder_preserves_openai_providers_as_an_opt_in_mode(tmp_path):
     assert isinstance(services.documents.embeddings, OpenAIEmbeddingProvider)
     assert isinstance(services.rag.language_model, OpenAILanguageModel)
     assert services.store.embedding_model == services.documents.embeddings.model
+
+
+def test_service_builder_uses_provider_specific_relevance_thresholds(tmp_path):
+    local = build_services(
+        Settings(
+            ai_mode="local",
+            local_min_relevance_score=0.27,
+            database_path=tmp_path / "local.db",
+        )
+    )
+    openai = build_services(
+        Settings(
+            ai_mode="openai",
+            openai_min_relevance_score=0.36,
+            database_path=tmp_path / "openai.db",
+        )
+    )
+
+    assert local.rag.min_relevance_score == 0.27
+    assert openai.rag.min_relevance_score == 0.36

@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
 
+import pytest
+
+from app.errors import ProviderError
+from app.llm import NO_INFORMATION_ANSWER
 from app.models import DocumentChunk
 from app.rag import NO_DOCUMENTS_ANSWER, RAGPipeline
 from app.vector_store import SQLiteVectorStore
@@ -79,3 +83,99 @@ def test_rag_filters_irrelevant_results_and_supports_document_filter(tmp_path):
     assert no_match.answer == NO_DOCUMENTS_ANSWER
     assert missing_document.answer == NO_DOCUMENTS_ANSWER
     assert language_model.calls == []
+
+
+def test_rag_filters_scores_before_top_k_and_only_cites_answer_evidence(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "ranked.db")
+    for doc_id, filename, text, vector in (
+        ("low", "below.txt", "Lower-scoring evidence.", [0.6, 0.8]),
+        ("high", "above.txt", "Higher-scoring evidence.", [0.8, 0.6]),
+    ):
+        chunk = DocumentChunk(
+            f"chunk-{doc_id}", doc_id, filename, text, None,
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        store.add_document(doc_id, filename, [chunk], [vector])
+
+    class CitingOnlySecondProvider:
+        def generate_answer(self, _question, context):
+            assert "[Source 1: above.txt]" in context
+            assert "below.txt" not in context
+            return "Higher-scoring evidence is relevant. [Source 1]"
+
+    result = RAGPipeline(
+        store, FakeEmbeddings(), CitingOnlySecondProvider(), top_k=1,
+        min_relevance_score=0.7,
+    ).answer("What is the evidence?")
+
+    assert result.answer.endswith("[Source 1]")
+    assert [source.filename for source in result.sources] == ["above.txt"]
+    assert result.sources[0].relevance_score == pytest.approx(0.8)
+
+
+def test_rag_returns_only_sources_cited_by_the_answer(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "cited-only.db")
+    for doc_id, filename, vector in (
+        ("first", "first.txt", [0.8, 0.6]),
+        ("second", "second.txt", [1.0, 0.0]),
+    ):
+        chunk = DocumentChunk(
+            f"chunk-{doc_id}", doc_id, filename, "Supported policy evidence.", None,
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        store.add_document(doc_id, filename, [chunk], [vector])
+
+    class CitesSecondProvider:
+        def generate_answer(self, _question, context):
+            assert "[Source 1: second.txt]" in context
+            assert "[Source 2: first.txt]" in context
+            return "The policy contains this evidence. [Source 1]"
+
+    result = RAGPipeline(
+        store,
+        FakeEmbeddings(),
+        CitesSecondProvider(),
+        top_k=2,
+        min_relevance_score=0.1,
+    ).answer("What does the policy say?")
+
+    assert [source.filename for source in result.sources] == ["second.txt"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["An uncited claim.", "A claim citing [Source 9].", NO_INFORMATION_ANSWER],
+)
+def test_rag_abstains_when_answer_has_no_valid_evidence_reference(tmp_path, answer):
+    store = SQLiteVectorStore(tmp_path / "citation-validation.db")
+    _add_document(store)
+
+    class UnreliableCitationProvider:
+        def generate_answer(self, _question, _context):
+            return answer
+
+    result = RAGPipeline(
+        store, FakeEmbeddings(), UnreliableCitationProvider()
+    ).answer("How do I secure remote access?")
+
+    assert result.answer == NO_INFORMATION_ANSWER
+    assert result.sources == []
+
+
+def test_rag_propagates_embedding_and_answer_provider_errors(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "provider-errors.db")
+    _add_document(store)
+
+    class FailingEmbeddings:
+        def embed(self, _texts):
+            raise ProviderError("embedding unavailable")
+
+    with pytest.raises(ProviderError, match="embedding unavailable"):
+        RAGPipeline(store, FailingEmbeddings(), FakeLanguageModel()).answer("question")
+
+    class FailingLanguageModel:
+        def generate_answer(self, _question, _context):
+            raise ProviderError("answer unavailable")
+
+    with pytest.raises(ProviderError, match="answer unavailable"):
+        RAGPipeline(store, FakeEmbeddings(), FailingLanguageModel()).answer("question")
