@@ -329,7 +329,7 @@ SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. 
 - Authentication and document ownership are implemented, but this remains a local demonstration service. Rate limits are process-local; there is no administrator web interface or malware scanning. Do not expose it publicly with sensitive data without a deployment-specific security review.
 - Text-only PDFs are supported; OCR, Office documents, and HTML are not.
 - OpenAI and Ollama generated prose is probabilistic and may hallucinate despite grounding instructions. Extractive mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
-- No job queue, streaming answers, feedback capture, external business-system actions, or frontend is included. The agent has only a fixed read-only knowledge search/list/metadata workflow.
+- No job queue, streaming answers, feedback capture, or external business-system actions are included. The agent has only a fixed read-only knowledge search/list/metadata workflow.
 - Conversation history is bounded and conversation-scoped; the application does not implement global user memory, summarization, or retention scheduling. Users can delete conversations explicitly.
 - Metrics and rate limits are process-local and reset on restart. There is no distributed metrics exporter or cross-worker aggregation.
 - Consider shared rate limiting, malware scanning, OCR, PostgreSQL with pgvector, background ingestion, and retrieval-quality monitoring before production use.
@@ -346,3 +346,7 @@ Screenshots are not included yet. Add captured Swagger/API examples here after p
 - Consider OCR and asynchronous ingestion only when document volume and file types justify the additional infrastructure.
 
 See [docs/architecture.md](docs/architecture.md), [docs/technical-decisions.md](docs/technical-decisions.md), and the [local demo guide](docs/demo-guide.md) for implementation details.
+
+## Web frontend
+
+A React and TypeScript web client is available in [`frontend/`](frontend/). It connects to the existing authenticated API for document management, the agent workflow, and saved conversations. See [frontend/README.md](frontend/README.md) for setup instructions. The frontend does not provision users or API tokens; create a token with the administrator CLI described above.
