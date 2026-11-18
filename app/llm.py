@@ -55,7 +55,8 @@ class ExtractiveAnswerProvider:
 
         candidates: list[tuple[float, float, int, str, str]] = []
         order = 0
-        for block in context.split("\n\n"):
+        source_blocks = re.split(r"(?m)(?=^\[Source \d+: .+\]$)", context.strip())
+        for block in source_blocks:
             lines = block.strip().splitlines()
             if len(lines) < 2 or not re.fullmatch(r"\[Source \d+: .+\]", lines[0]):
                 continue

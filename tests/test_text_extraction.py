@@ -7,7 +7,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from app.errors import InvalidDocumentError
-from app.text_extraction import extract_text, validate_filename
+from app.text_extraction import clean_text, extract_text, validate_filename
 
 
 def test_extract_text_reads_utf8_text():
@@ -36,6 +36,26 @@ def test_extract_text_rejects_unsupported_empty_and_invalid_utf8_files():
 def test_text_extraction_enforces_extracted_character_limit():
     with pytest.raises(InvalidDocumentError, match="extracted text exceeds"):
         extract_text("policy.txt", b"12345", max_extracted_text_chars=4)
+
+
+def test_txt_extraction_handles_bom_newlines_unicode_and_paragraphs():
+    pages = extract_text(
+        "unicode.txt",
+        "\ufeffCafe\u0301\r\n\r\nKeep 東京 safe.\r".encode("utf-8"),
+    )
+
+    assert pages[0].text == "Café\n\nKeep 東京 safe."
+
+
+def test_text_cleaning_collapses_noise_but_preserves_meaningful_layout():
+    cleaned = clean_text("  Heading\t One  \r\n\r\n\r\nBody\x00 text!  \r")
+
+    assert cleaned == "Heading One\n\nBody text!"
+
+
+def test_txt_rejects_whitespace_only_content_after_cleaning():
+    with pytest.raises(InvalidDocumentError, match="no extractable text"):
+        extract_text("blank.txt", b" \t\r\n \r\n")
 
 
 def test_pdf_extraction_enforces_page_and_extracted_text_limits(monkeypatch):
@@ -133,3 +153,60 @@ def test_pdf_extraction_rejects_invalid_signature_and_encrypted_files(monkeypatc
     )
     with pytest.raises(InvalidDocumentError, match="Encrypted PDF"):
         extract_text("locked.pdf", b"%PDF-1.7\nfake bytes")
+
+
+def test_pdf_extraction_normalizes_text_and_ignores_empty_pages(monkeypatch):
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+    class FakeReader:
+        is_encrypted = False
+        pages = [
+            FakePage("  Policy\r\n\r\n Keep  café safe. "),
+            FakePage(" \t\r\n "),
+            FakePage("Page three — résumé."),
+        ]
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
+    pages = extract_text("report.pdf", b"%PDF-1.7")
+
+    assert [(page.text, page.page_number) for page in pages] == [
+        ("Policy\n\nKeep café safe.", 1),
+        ("Page three — résumé.", 3),
+    ]
+
+
+def test_corrupt_pdf_errors_are_safe_and_image_only_pdf_is_rejected(monkeypatch):
+    class BrokenReader:
+        is_encrypted = False
+
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("private parser details")
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=BrokenReader))
+    with pytest.raises(InvalidDocumentError, match="PDF could not be read") as error:
+        extract_text("broken.pdf", b"%PDF-1.7")
+    assert "private parser details" not in str(error.value)
+
+    class ImageOnlyReader:
+        is_encrypted = False
+        pages = [
+            SimpleNamespace(extract_text=lambda: ""),
+            SimpleNamespace(extract_text=lambda: None),
+        ]
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "pypdf", SimpleNamespace(PdfReader=ImageOnlyReader)
+    )
+    with pytest.raises(InvalidDocumentError, match="no extractable text"):
+        extract_text("scan.pdf", b"%PDF-1.7")

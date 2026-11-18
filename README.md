@@ -115,8 +115,9 @@ With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI creden
 | `CHAT_MODEL` | `gpt-4.1-mini` | OpenAI answer model |
 | `DATABASE_PATH` | `data/knowledge.db` | SQLite file path for OpenAI mode |
 | `LOCAL_DATABASE_PATH` | `data/knowledge-local.db` | Separate SQLite file for local mode |
-| `CHUNK_SIZE` | `1000` | Approximate maximum characters per chunk |
+| `CHUNK_SIZE` | `1000` | Maximum Unicode characters per chunk |
 | `CHUNK_OVERLAP` | `150` | Character overlap between chunks |
+| `MAX_DOCUMENT_CHUNKS` | `10000` | Maximum chunks allowed for one document |
 | `TOP_K` | `4` | Maximum retrieved passages (1–20) |
 | `MIN_RELEVANCE_SCORE` | `0.15` | Shared fallback minimum cosine score (0–1) |
 | `LOCAL_MIN_RELEVANCE_SCORE` | unset | Optional local provider override; tune with local evaluation cases |
@@ -130,7 +131,9 @@ With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI creden
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Per-user sliding-window length |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated allowed origins |
 
-Chunking normalizes repeated whitespace, prefers word boundaries where possible, and applies overlap to retain context between neighboring chunks. PDF pages are chunked separately so page citations remain accurate. Scanned-image PDFs do not contain extractable text and are rejected as empty; OCR is not included.
+TXT content must be UTF-8; a UTF-8 BOM is accepted. Cleaning applies Unicode NFC normalization, normalizes line endings, collapses horizontal whitespace, removes control characters, and preserves paragraph breaks and punctuation. PDF extraction proceeds in page order and keeps page numbers. It conservatively retains line breaks because PDF layout is ambiguous; image-only or otherwise textless PDFs are rejected, and OCR is not included. Corrupt or encrypted PDFs produce a safe validation error.
+
+Chunking preserves normalized paragraph and line boundaries where possible, then prefers sentence endings and word boundaries before a hard character cut. Short heading-like lines are kept with following content when the configured size permits it. Each chunk is at most `CHUNK_SIZE` Unicode characters; overlap is bounded and favors a whole preceding word. PDF pages are chunked separately so page citations remain accurate. `MAX_DOCUMENT_CHUNKS` bounds the chunk count before embedding; exceeding it fails ingestion without storing a partial document. These are deterministic formatting heuristics, not semantic layout analysis.
 
 SQLite creates its tables and indexes automatically when the store is first initialized. Back up the database file selected for the active mode (`LOCAL_DATABASE_PATH` or `DATABASE_PATH`); in Compose, back up the `agent-data` volume.
 

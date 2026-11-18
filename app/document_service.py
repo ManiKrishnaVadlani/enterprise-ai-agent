@@ -21,6 +21,7 @@ class DocumentService:
         max_upload_bytes: int,
         max_pdf_pages: int = 200,
         max_extracted_text_chars: int = 2_000_000,
+        max_document_chunks: int = 10_000,
     ):
         self.store = store
         self.embeddings = embeddings
@@ -29,6 +30,7 @@ class DocumentService:
         self.max_upload_bytes = max_upload_bytes
         self.max_pdf_pages = max_pdf_pages
         self.max_extracted_text_chars = max_extracted_text_chars
+        self.max_document_chunks = max_document_chunks
 
     def ingest(
         self, filename: str, content: bytes, owner_id: str | None = None
@@ -59,6 +61,12 @@ class DocumentService:
                         ingested_at=ingested_at,
                     )
                 )
+                if len(chunks) > self.max_document_chunks:
+                    raise InvalidDocumentError(
+                        "The document would produce too many chunks to process safely."
+                    )
+        if not chunks:
+            raise InvalidDocumentError("The document contains no usable text.")
         vectors = self.embeddings.embed([chunk.text for chunk in chunks])
         self.store.add_document(
             document_id, filename, chunks, vectors, owner_id=owner_id

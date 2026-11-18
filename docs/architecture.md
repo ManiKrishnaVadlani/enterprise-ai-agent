@@ -88,9 +88,11 @@ sequenceDiagram
 
 `validate_filename()` allows only plain filenames with `.txt` or `.pdf` extensions. It rejects paths, null bytes, unsupported extensions, empty names, and names longer than 255 characters. TXT extraction is bounded by `MAX_EXTRACTED_TEXT_CHARS`. PDF extraction also enforces `MAX_PDF_PAGES` and the extracted-text cap, and configures pypdf recovery and cross-reference entry limits.
 
-For TXT files, `extract_text()` decodes UTF-8 using `utf-8-sig`, which also removes a UTF-8 byte-order mark at the start of the file. Empty text and invalid UTF-8 are rejected. For PDF files, it requires a `%PDF-` signature and uses `pypdf` to extract text page by page. The page number is carried into each chunk. Encrypted PDFs and PDFs with no extractable text are rejected; OCR is not implemented.
+For TXT files, `extract_text()` decodes UTF-8 using `utf-8-sig`, which also removes a UTF-8 byte-order mark at the start of the file. Invalid UTF-8 and content that becomes empty after cleaning are rejected. `clean_text()` applies Unicode NFC normalization, standardizes CRLF/CR newlines, collapses spaces and tabs within each line, removes control characters other than line breaks and tabs, and preserves paragraph breaks and punctuation. It does not attempt to infer or rewrite broken words.
 
-`chunk_text()` collapses whitespace to single spaces, then creates character-sized windows. It prefers a space boundary when possible and advances the next window by the configured overlap. Each PDF page is chunked separately so chunks retain their originating page number. Chunking operates on text in memory; original uploaded files are not saved by the ingestion service.
+For PDF files, extraction requires a `%PDF-` signature and uses `pypdf` in page order. Extracted text is cleaned page by page, empty pages are skipped, and the original page number is retained for citations. Encrypted, corrupt, and textless PDFs are rejected with safe application errors; OCR is not implemented. Single PDF line breaks are conservatively preserved because the extractor cannot reliably distinguish layout wraps from meaningful list or heading boundaries.
+
+`chunk_text()` normalizes line endings and repeated horizontal whitespace while preserving paragraph separators. It fills bounded character windows, preferring paragraph boundaries, then sentence endings, line boundaries, and whitespace. Short heading-like lines are kept with following content when the configured limit allows. If no meaningful boundary fits, it uses the final safe character cut, including for a very long unbroken token. Overlap favors a whole preceding word, so the actual overlap can be slightly larger than its configured character count. Every chunk is at most `CHUNK_SIZE` Unicode characters. Each PDF page is chunked separately so chunks retain their source page. `MAX_DOCUMENT_CHUNKS` caps the number built for one document before embedding; crossing the cap rejects the upload before persistent writes. Original uploaded files are not saved.
 
 ## 6. Embedding generation
 
@@ -182,6 +184,8 @@ The Dockerfile uses `python:3.14-slim`, installs `requirements.txt`, copies the 
 - Extractive answer generation selects sentences with sufficient lexical question-term coverage; it does not synthesize, paraphrase, or reason like a language model. Ollama generation is probabilistic and can hallucinate.
 - SQLite search calculates cosine similarity by scanning vectors in Python. It is intended for a small corpus, not large-scale or high-concurrency workloads.
 - TXT files must be UTF-8. PDFs must contain extractable text; OCR, Office formats, and HTML are not supported.
+- Cleaning preserves wording and layout conservatively; it does not infer PDF columns, remove recurring headers/footers, repair hyphenated line wraps, or perform OCR. Chunk boundaries use simple deterministic heuristics rather than semantic structure analysis.
+- `MAX_DOCUMENT_CHUNKS` limits processing fan-out, while upload bytes, PDF pages, and extracted text also remain bounded by their configured limits.
 - The upload endpoint expects raw bytes, not `multipart/form-data`, and buffers the request up to the configured size limit.
 - CORS allows only explicit configured origins, `GET`/`POST`/`DELETE` methods, and `Content-Type`, `Authorization`, and `X-Filename` headers. CORS is a browser policy, not authentication or authorization.
 - Authenticated request limits and upload concurrency bounds are process-local; they do not coordinate across workers or replicas.

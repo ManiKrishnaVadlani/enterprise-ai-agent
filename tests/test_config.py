@@ -55,6 +55,7 @@ def test_app_name_is_read_after_dotenv_loading(monkeypatch):
         {"ollama_context_length": 256},
         {"ollama_max_prompt_chars": 100001},
         {"ollama_think": "false"},
+        {"max_document_chunks": 0},
     ],
 )
 def test_security_and_resource_settings_reject_invalid_values(kwargs):

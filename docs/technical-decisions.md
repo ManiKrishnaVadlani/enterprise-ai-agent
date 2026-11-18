@@ -215,36 +215,40 @@ Extractive, Ollama, and OpenAI implementations satisfy the same small method con
 
 Directly calling OpenAI from the route or document service is a general simpler alternative, but it would couple those components to a vendor and does not match the current protocol-based design. No alternative dependency-injection framework is used.
 
-## 8. Character chunking with configurable overlap
+## 8. Conservative text cleaning and structure-aware character chunking
 
 ### Context/problem
 
-Documents can be longer than the passages that should be embedded and retrieved as individual units. Splitting text also limits the context sent to the answer provider.
+Extraction output includes formatting differences, line endings, and occasional control characters. Documents can also be longer than the passages that should be embedded and retrieved as individual units. Flattening all whitespace loses paragraph and heading clues, while token-aware or semantic splitters would add complexity or dependencies.
 
 ### Decision
 
-`chunk_text()` divides normalized text into character-sized windows, preferring word boundaries where possible. `CHUNK_SIZE` defaults to 1000 characters and `CHUNK_OVERLAP` defaults to 150 characters. Settings validate that the chunk size is positive and overlap is non-negative and smaller than the chunk size.
+`clean_text()` applies Unicode NFC normalization, standardizes line endings, collapses horizontal whitespace, removes control characters other than tabs and newlines, and preserves blank-line paragraph breaks. `chunk_text()` creates windows no longer than `CHUNK_SIZE` (default 1000 Unicode characters), preferring paragraph boundaries, sentence endings, line breaks, and then word boundaries. It keeps short heading-like lines with following content when possible and falls back to a character boundary for oversized words or sentences. `CHUNK_OVERLAP` defaults to 150 characters; whole-word overlap may slightly exceed that value. `MAX_DOCUMENT_CHUNKS` defaults to 10,000 and rejects high-fan-out documents before embedding or storage. Each PDF page is processed separately and keeps its page number.
 
 ### Reasoning
 
-Overlap repeats some text between neighboring chunks, reducing the chance that a useful phrase near a boundary is separated from the surrounding context. PDF pages are chunked separately so each chunk retains the page number used for source attribution.
+The pipeline keeps the current lightweight, dependency-free design and avoids rewriting document content based on uncertain layout guesses. Structure-aware split points keep many paragraphs and sentences together, while overlap helps preserve context when a document still needs multiple chunks. The chunk-count cap bounds downstream embedding and database work even when chunk settings are unusually small.
 
 ### Advantages
 
-- Chunking bounds the size of each embedded and retrieved text passage.
+- Cleaning is deterministic and retains Unicode wording, punctuation, and paragraph boundaries.
+- Chunking bounds each embedded and retrieved passage and prefers meaningful textual boundaries.
 - Overlap can preserve continuity across adjacent chunks.
 - Chunk size and overlap can be changed through environment settings.
 - Page-aware processing retains PDF page metadata.
+- Upload, extracted-text, page, and chunk-count caps bound processing work.
 
 ### Trade-offs
 
-- Character windows are not based on token counts, so they do not precisely control model token usage.
-- Overlap duplicates text, which increases the number of stored chunks and can create repeated retrieval results.
+- Character limits are not token limits, so they do not precisely control model context usage.
+- A PDF line break may represent a layout wrap or a meaningful boundary; this implementation conservatively keeps it and does not repair columns, recurring headers/footers, or hyphenated words.
+- Heading detection is a simple heuristic. It cannot understand arbitrary document structure, and hard cuts may still separate content when text is larger than the configured limit.
+- Overlap duplicates text and can increase storage or repeated retrieval; the chunk cap can reject highly fragmented documents.
 - Fixed defaults may not suit every document type or question style.
 
 ### Alternatives considered
 
-The repository implements character-based chunking only. Token-based or structure-aware splitting are general alternatives; no benchmark or alternative splitter is included.
+Token-based and document-format-aware splitters are general alternatives, but are not implemented or benchmarked here. OCR and layout analysis are also outside the current dependency and feature scope.
 
 ## 9. Docker and Docker Compose
 

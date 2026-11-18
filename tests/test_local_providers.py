@@ -72,3 +72,18 @@ def test_extractive_provider_returns_safe_no_information_without_overlap(
 def test_extractive_provider_requires_a_positive_sentence_limit():
     with pytest.raises(ValueError, match="max_sentences"):
         ExtractiveAnswerProvider(max_sentences=0)
+
+
+def test_extractive_provider_reads_evidence_after_a_paragraph_break_in_a_chunk():
+    context = (
+        "[Source 1: policy.txt]\n"
+        "Security policy overview.\n\n"
+        "Access reviews happen quarterly."
+    )
+
+    answer = ExtractiveAnswerProvider().generate_answer(
+        "When do access reviews happen?", context
+    )
+
+    assert "quarterly" in answer.lower()
+    assert "[Source 1: policy.txt]" in answer

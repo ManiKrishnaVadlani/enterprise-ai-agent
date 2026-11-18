@@ -58,6 +58,7 @@ def build_services(settings: Settings) -> ApplicationServices:
             max_upload_bytes=settings.max_upload_bytes,
             max_pdf_pages=settings.max_pdf_pages,
             max_extracted_text_chars=settings.max_extracted_text_chars,
+            max_document_chunks=settings.max_document_chunks,
         ),
         rag=RAGPipeline(
             store=store,

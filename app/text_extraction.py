@@ -1,6 +1,7 @@
 """Validate and extract text from supported TXT and PDF uploads."""
 
 from io import BytesIO
+import unicodedata
 from pathlib import PurePath
 
 from app.errors import InvalidDocumentError
@@ -12,6 +13,29 @@ DEFAULT_MAX_PDF_PAGES = 200
 DEFAULT_MAX_EXTRACTED_TEXT_CHARS = 2_000_000
 PDF_ROOT_OBJECT_RECOVERY_LIMIT = 1_000
 PDF_XREF_STREAM_MAXIMUM_ENTRIES = 200_000
+
+
+def clean_text(text: str) -> str:
+    """Normalize whitespace without flattening paragraphs or changing wording."""
+    normalized = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
+    safe_characters = []
+    for character in normalized:
+        if character in "\n\t" or unicodedata.category(character) != "Cc":
+            safe_characters.append(character)
+        else:
+            safe_characters.append(" ")
+
+    lines = [" ".join(line.split()) for line in "".join(safe_characters).split("\n")]
+    cleaned_lines: list[str] = []
+    blank_lines = 0
+    for line in lines:
+        if line:
+            cleaned_lines.append(line)
+            blank_lines = 0
+        elif cleaned_lines and blank_lines == 0:
+            cleaned_lines.append("")
+            blank_lines = 1
+    return "\n".join(cleaned_lines).strip()
 
 
 def validate_filename(filename: str) -> str:
@@ -42,7 +66,7 @@ def extract_text(
 
     if filename.lower().endswith(".txt"):
         try:
-            text = content.decode("utf-8-sig").strip()
+            text = clean_text(content.decode("utf-8-sig"))
         except UnicodeDecodeError as error:
             raise InvalidDocumentError("TXT files must use UTF-8 encoding.") from error
         if len(text) > max_extracted_text_chars:
@@ -70,14 +94,14 @@ def extract_text(
         pages = []
         total_characters = 0
         for number, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
+            text = clean_text(page.extract_text() or "")
             total_characters += len(text)
             if total_characters > max_extracted_text_chars:
                 raise InvalidDocumentError(
                     "The extracted text exceeds the configured limit."
                 )
-            if text.strip():
-                pages.append(ExtractedPage(text=text.strip(), page_number=number))
+            if text:
+                pages.append(ExtractedPage(text=text, page_number=number))
     except InvalidDocumentError:
         raise
     except Exception as error:

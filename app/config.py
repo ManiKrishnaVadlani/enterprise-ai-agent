@@ -65,6 +65,7 @@ class Settings:
     max_extracted_text_chars: int = int(
         os.getenv("MAX_EXTRACTED_TEXT_CHARS", "2000000")
     )
+    max_document_chunks: int = int(os.getenv("MAX_DOCUMENT_CHUNKS", "10000"))
     rate_limit_requests: int = int(os.getenv("RATE_LIMIT_REQUESTS", "120"))
     rate_limit_window_seconds: float = float(
         os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")
@@ -152,6 +153,8 @@ class Settings:
             raise ValueError("MAX_PDF_PAGES must be positive")
         if self.max_extracted_text_chars < 1:
             raise ValueError("MAX_EXTRACTED_TEXT_CHARS must be positive")
+        if self.max_document_chunks < 1:
+            raise ValueError("MAX_DOCUMENT_CHUNKS must be positive")
         if self.rate_limit_requests < 1:
             raise ValueError("RATE_LIMIT_REQUESTS must be positive")
         if (
