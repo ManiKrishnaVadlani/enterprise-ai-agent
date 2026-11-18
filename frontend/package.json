@@ -7,13 +7,15 @@
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.app.json && node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json",
     "build": "npm run typecheck && node ./node_modules/vite/bin/vite.js build",
     "preview": "node ./node_modules/vite/bin/vite.js preview",
-    "dev": "node ./node_modules/vite/bin/vite.js"
+    "dev": "node ./node_modules/vite/bin/vite.js",
+    "start": "serve --single --listen $PORT dist"
   },
   "dependencies": {
     "lucide-react": "1.75.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "react-router": "^7.0.0"
+    "react-router": "^7.0.0",
+    "serve": "^14.2.8"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.5",
