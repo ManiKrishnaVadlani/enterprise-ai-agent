@@ -49,6 +49,7 @@ class RAGPipeline:
         question: str,
         document_id: str | None = None,
         owner_id: str | None = None,
+        retrieval_query: str | None = None,
     ) -> Answer:
         documents = (
             self.store.list_documents(owner_id=owner_id)
@@ -64,12 +65,12 @@ class RAGPipeline:
         if not documents:
             return Answer(answer=NO_DOCUMENTS_ANSWER, sources=[])
         try:
-            query_vectors = self.embeddings.embed([question])
+            query_vectors = self.embeddings.embed([retrieval_query or question])
             if len(query_vectors) != 1:
                 raise ProviderError("The embedding provider returned no query vector.")
             matches = self.store.search(
                 query_vectors[0],
-                self.top_k,
+                min(self.top_k * 3, 60),
                 document_id,
                 owner_id,
                 min_score=self.min_relevance_score,
@@ -79,7 +80,21 @@ class RAGPipeline:
 
         # Keep this guard as well as the store-side filter so alternate store
         # implementations cannot accidentally send below-threshold passages.
-        relevant = [match for match in matches if match.score >= self.min_relevance_score]
+        relevant = []
+        seen_passages: set[tuple[str, str]] = set()
+        for match in matches:
+            if match.score < self.min_relevance_score:
+                continue
+            normalized_passage = (
+                match.chunk.document_id,
+                " ".join(match.chunk.text.split()).casefold(),
+            )
+            if normalized_passage in seen_passages:
+                continue
+            seen_passages.add(normalized_passage)
+            relevant.append(match)
+            if len(relevant) >= self.top_k:
+                break
         if not relevant:
             return Answer(answer=NO_DOCUMENTS_ANSWER, sources=[])
 

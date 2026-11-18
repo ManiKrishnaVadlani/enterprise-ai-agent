@@ -196,12 +196,18 @@ def test_fresh_store_creates_versioned_identity_schema_and_constraints(tmp_path)
                 ("b" * 64,),
             )
 
-    assert {"users", "api_tokens", "documents", "chunks", "store_metadata"} <= tables
+    assert {
+        "users", "api_tokens", "documents", "chunks", "store_metadata",
+        "conversations", "conversation_messages",
+    } <= tables
     assert "owner_id" in document_columns
     assert "idx_documents_owner_id" in document_indexes
     assert any(row[1] == "idx_api_tokens_user_id" for row in token_indexes)
     assert unique_token_hash_index
-    assert migration_versions == [(1, "add_users_tokens_and_document_ownership")]
+    assert migration_versions == [
+        (1, "add_users_tokens_and_document_ownership"),
+        (2, "add_user_owned_conversations"),
+    ]
     assert token_record.token_hash == token
     assert store.get_active_user_for_token_hash(token).user_id == "user-1"
 
@@ -285,7 +291,7 @@ def test_legacy_database_migration_preserves_documents_chunks_and_vectors(tmp_pa
     )
     assert stored_metadata == {"embedding_model": "legacy-model", "embedding_dimension": "2"}
     assert owner_id is None
-    assert version_rows == [(1,)]
+    assert version_rows == [(1,), (2,)]
     assert listed[0].owner_id is None
     assert listed[0].chunk_count == 1
     assert results[0].chunk.text == "Existing policy text."
@@ -293,7 +299,7 @@ def test_legacy_database_migration_preserves_documents_chunks_and_vectors(tmp_pa
 
     SQLiteVectorStore(database, embedding_model="legacy-model")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
 
 

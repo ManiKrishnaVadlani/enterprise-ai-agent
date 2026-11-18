@@ -18,6 +18,10 @@ Organizations keep useful policies and procedures in documents that are difficul
 - Document upload, list, and delete API operations.
 - Privacy-safe request logging, bounded uploads and PDF processing, authenticated rate limits, safe API errors, and configurable CORS.
 - Mock-based tests that do not make paid API calls.
+- An authenticated, allowlisted agent workflow with knowledge search, document listing, and metadata-only document lookup tools.
+- User-owned conversations with bounded history persistence and follow-up question retrieval expansion.
+- Process-local request metrics and request IDs, with privacy-safe operational logging.
+- Duplicate passage suppression before context assembly.
 
 ## Architecture and request flow
 
@@ -72,6 +76,9 @@ app/
   models.py            # shared data objects
   provisioning.py      # administrator user/token CLI
   rag.py               # retrieval, context assembly, citations
+  tools.py             # schema-validated, allowlisted knowledge tools
+  agent.py             # bounded deterministic agent workflow
+  observability.py     # request IDs, safe logs, process-local metrics
   routes.py            # FastAPI endpoints and error mapping
   services.py          # application service composition
   text_extraction.py   # TXT and PDF extraction
@@ -81,7 +88,7 @@ evaluation/
   metrics.py           # retrieval metric calculations
   run.py               # explicitly invoked evaluator CLI
   runner.py            # isolated evaluation orchestration
-docs/                  # architecture, technical decisions, evaluation guide
+docs/                  # architecture, technical decisions, evaluation, demo, interview, resume notes
 tests/                 # API, service, provider, and Python learning tests
 main.py                # FastAPI app factory and application entry point
 Dockerfile
@@ -212,8 +219,13 @@ All endpoints are documented in Swagger/OpenAPI.
 | `GET` | `/documents` | List indexed documents and chunk counts |
 | `DELETE` | `/documents/{document_id}` | Delete a document and all its chunks |
 | `POST` | `/ask` | Retrieve passages and return an answer with sources |
+| `GET` | `/tools` | List the authenticated agent's available tool schemas |
+| `POST` | `/agent` | Run the bounded search-and-answer workflow; optionally continue a conversation |
+| `GET`, `POST` | `/conversations` | List owned conversations or create one |
+| `GET`, `DELETE` | `/conversations/{conversation_id}` | Read or delete an owned conversation and its history |
+| `GET` | `/metrics` | Read process-local request counts and aggregate durations |
 
-`/`, `/health`, and `/ready` are public. Upload, list, delete, and ask require `Authorization: Bearer <token>`. Documents are scoped to their owner in the SQLite queries. Legacy documents without an owner remain stored but are not visible in user-scoped list or search results; specific access and deletion return 404.
+`/`, `/health`, and `/ready` are public. Data, agent, conversation, tool-schema, and metrics routes require `Authorization: Bearer <token>`. Documents and conversations are scoped to their owner in SQLite queries. Legacy documents without an owner remain stored but are not visible in user-scoped list or search results; specific access and deletion return 404.
 
 Upload the raw file bytes with `X-Filename` and `Content-Type: application/octet-stream`:
 
@@ -235,6 +247,8 @@ curl.exe -X POST "http://127.0.0.1:8000/ask" `
 ```
 
 The answer response includes `question`, `answer`, and `sources`. Each source has a document ID, original filename, chunk ID, optional PDF page number, and relevance score. Sources correspond only to source labels cited by the returned answer. Missing or invalid source references produce the no-information response with an empty source list. You can scope retrieval with `{"question":"...","document_id":"..."}`.
+
+The `/agent` endpoint runs one fixed, bounded knowledge-search tool call and then reuses the existing RAG pipeline for answering and citation validation. It does not let a model execute arbitrary actions. To keep a conversation, create it with `POST /conversations`, then send its ID with `/agent`; recent user questions can expand retrieval for follow-ups, while assistant text is not used as tool instructions. The authenticated `/tools` endpoint documents the allowlisted tool schemas. `document_info` returns metadata only. `/metrics` exposes process-local aggregated request counts and duration totals; it is not a distributed monitoring backend.
 
 List indexed documents and delete a document with:
 
@@ -315,5 +329,20 @@ SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. 
 - Authentication and document ownership are implemented, but this remains a local demonstration service. Rate limits are process-local; there is no administrator web interface or malware scanning. Do not expose it publicly with sensitive data without a deployment-specific security review.
 - Text-only PDFs are supported; OCR, Office documents, and HTML are not.
 - OpenAI and Ollama generated prose is probabilistic and may hallucinate despite grounding instructions. Extractive mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
-- No job queue, streaming answers, feedback capture, workflow actions, or frontend is included.
+- No job queue, streaming answers, feedback capture, external business-system actions, or frontend is included. The agent has only a fixed read-only knowledge search/list/metadata workflow.
+- Conversation history is bounded and conversation-scoped; the application does not implement global user memory, summarization, or retention scheduling. Users can delete conversations explicitly.
+- Metrics and rate limits are process-local and reset on restart. There is no distributed metrics exporter or cross-worker aggregation.
 - Consider shared rate limiting, malware scanning, OCR, PostgreSQL with pgvector, background ingestion, and retrieval-quality monitoring before production use.
+
+## Screenshots
+
+Screenshots are not included yet. Add captured Swagger/API examples here after preparing a demo environment; do not include API tokens or private documents.
+
+## Roadmap
+
+- Evaluate hybrid lexical/vector retrieval on a larger, independently labeled local dataset before changing ranking.
+- Add operational retention and backup guidance for conversation data.
+- Consider a scalable vector index and shared rate limiting if deployment requirements exceed a single-process local demo.
+- Consider OCR and asynchronous ingestion only when document volume and file types justify the additional infrastructure.
+
+See [docs/architecture.md](docs/architecture.md), [docs/technical-decisions.md](docs/technical-decisions.md), and the [local demo guide](docs/demo-guide.md) for implementation details.

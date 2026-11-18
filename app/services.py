@@ -1,6 +1,7 @@
 """Application service composition for the modular monolith."""
 
 from dataclasses import dataclass
+import logging
 
 from app.config import Settings
 from app.document_service import DocumentService
@@ -8,6 +9,10 @@ from app.embeddings import LocalEmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm import ExtractiveAnswerProvider, OllamaLanguageModel, OpenAILanguageModel
 from app.rag import RAGPipeline
 from app.vector_store import SQLiteVectorStore
+from app.agent import AgentOrchestrator
+from app.tools import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -15,6 +20,8 @@ class ApplicationServices:
     store: SQLiteVectorStore
     documents: DocumentService
     rag: RAGPipeline
+    tools: ToolRegistry | None = None
+    agent: AgentOrchestrator | None = None
 
 
 def build_services(settings: Settings) -> ApplicationServices:
@@ -48,7 +55,7 @@ def build_services(settings: Settings) -> ApplicationServices:
     store = SQLiteVectorStore(
         settings.database_path, embedding_model=embedding_model_id
     )
-    return ApplicationServices(
+    services = ApplicationServices(
         store=store,
         documents=DocumentService(
             store=store,
@@ -68,3 +75,10 @@ def build_services(settings: Settings) -> ApplicationServices:
             min_relevance_score=settings.relevance_threshold_for(settings.ai_mode),
         ),
     )
+    services.tools = ToolRegistry(services)
+    services.agent = AgentOrchestrator(services.tools, services.rag)
+    logger.info(
+        "Application providers configured ai_mode=%s embedding_provider=%s answer_provider=%s",
+        settings.ai_mode, type(embeddings).__name__, type(language_model).__name__,
+    )
+    return services

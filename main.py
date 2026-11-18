@@ -11,6 +11,7 @@ from app.routes import (
     unexpected_error_handler,
 )
 from app.services import ApplicationServices
+from app.observability import RequestMetrics, RequestMetricsMiddleware
 
 
 configure_logging()
@@ -40,6 +41,8 @@ def create_app(
         app_settings.rate_limit_requests,
         app_settings.rate_limit_window_seconds,
     )
+    application.state.request_metrics = RequestMetrics()
+    application.add_middleware(RequestMetricsMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(app_settings.allowed_origins),

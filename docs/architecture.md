@@ -167,6 +167,11 @@ The route dependency `get_services()` builds and caches application services on 
 | `GET` | `/documents` | Returns indexed document metadata and chunk counts. |
 | `DELETE` | `/documents/{document_id}` | Deletes a document and cascades deletion to its chunks. |
 | `POST` | `/ask` | Retrieves context and returns an answer with source metadata. |
+| `GET` | `/tools` | Lists schemas for the authenticated read-only tool allowlist. |
+| `POST` | `/agent` | Runs one bounded knowledge search, then invokes the existing RAG pipeline. |
+| `GET`, `POST` | `/conversations` | Lists or creates authenticated-user conversations. |
+| `GET`, `DELETE` | `/conversations/{conversation_id}` | Reads or deletes an owned conversation and cascaded messages. |
+| `GET` | `/metrics` | Returns authenticated process-local request counters and duration totals. |
 
 `/`, `/health`, and `/ready` remain public. Upload, list, delete, and ask use `get_rate_limited_user`; token hashes are computed before database lookup and only non-revoked tokens for active users authenticate. The database queries themselves apply owner filters for listing, search, and deletion.
 
@@ -193,3 +198,65 @@ The Dockerfile uses `python:3.14-slim`, installs `requirements.txt`, copies the 
 - Existing ownerless documents are preserved but inaccessible through user-scoped endpoints until an administrator-defined ownership policy is applied.
 - OpenAI responses are generated prose and can be wrong even when instructed to use only retrieved context. Review consequential answers against the source documents.
 - Docker configuration is described by the Dockerfile and Compose file; this document does not assert that an image was built or deployed.
+
+## 14. Safe tools and bounded workflow
+
+`app/tools.py` contains an explicit registry with three read-only tools: `knowledge_search`, `document_list`, and `document_info`. Each tool has a Pydantic input schema. Unknown names and invalid arguments return safe tool errors. Search passes the authenticated user ID to the existing vector store query; listing and metadata lookup use owner-filtered document summaries. Search returns at most ten chunks and clips each text excerpt to 2,000 characters. The registry does not expose arbitrary SQL, shell, Python, or filesystem operations.
+
+`app/agent.py` implements a deterministic workflow rather than model-selected function calling: make one knowledge search, then call the existing RAG pipeline to generate and validate the answer. A run has at most two recorded steps and one tool call. The second retrieval is retained to preserve the existing RAG source and citation handling. This means the current workflow can repeat retrieval work; it is intentionally simple and predictable.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant Tool as Allowlisted search tool
+    participant Store as SQLite (owner filter)
+    participant RAG
+    Client->>API: POST /agent + bearer token
+    API->>Tool: Search as authenticated user
+    Tool->>Store: Owner-scoped top-k retrieval
+    Store-->>Tool: Bounded chunk excerpts
+    API->>RAG: Existing answer and citation pipeline
+    RAG-->>API: Grounded answer + validated sources
+    API-->>Client: Answer + bounded workflow summary
+```
+
+## 15. Conversation persistence and context
+
+Schema migration version 2 adds `conversations` and `conversation_messages`. Both are associated with a user through a foreign key; deleting a conversation cascades to its messages. Every lookup, append, list, and delete operation filters by both conversation ID and authenticated user ID. Message roles are limited to `user` and `assistant`, each content value is limited to 12,000 characters, history reads are capped at 50 rows, and list results are capped at 100 conversations.
+
+`POST /agent` can be given a conversation ID. It stores the current user question and resulting answer, retaining at most the latest 200 messages per conversation. Up to two recent user questions are added to the retrieval query to help with follow-up references. Assistant history is not inserted into tool arguments or security instructions. There is no global memory, model summarizer, retention scheduler, or context-based answer synthesis from previous assistant messages. Users can explicitly delete a conversation. The conversation API returns 404 for missing and non-owned IDs.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant API
+    participant Store as Owner-scoped SQLite
+    participant Agent
+    User->>API: POST /agent (conversation ID + question)
+    API->>Store: Load recent history for authenticated owner
+    Store-->>API: Bounded recent messages
+    API->>Store: Save current user message
+    API->>Agent: Question + limited prior user questions
+    Agent-->>API: Answer, citations, workflow summary
+    API->>Store: Save assistant answer
+    API-->>User: Answer + sources + conversation ID
+```
+
+## 16. Retrieval quality change
+
+After the existing relevance threshold is applied, `RAGPipeline` removes exact duplicate passages from the same document after whitespace normalization and case folding. It preserves matching passages from separate documents so they remain independently citable. It requests at most three times `TOP_K` candidates (bounded to 60), then gives no more than `TOP_K` unique passages to the answer provider. Ranking scores, owner filtering, and the threshold are unchanged. This suppresses repeated identical passages within a document but does not add BM25, semantic reranking, or corpus-wide compute limits; SQLite still scores every owner-eligible vector.
+
+## 17. Observability and operations
+
+`RequestMetricsMiddleware` assigns each response an opaque `X-Request-ID`, records request counts and cumulative duration by HTTP method, route template, and status code, and emits a structured log line with those same non-content fields. Service construction logs the selected provider class names. The agent logs tool name/status, step and call counts, retrieved chunk count, and tool/answer-pipeline durations. It does not record prompts, tokens, document text, answers, or raw URL paths for unmatched routes. `GET /metrics` is authenticated and reports process-local request aggregates. Metrics and existing rate limits reset when the process restarts and are not shared across workers.
+
+`/health` remains a liveness response. `/ready` checks that SQLite can answer a simple query; it does not invoke embeddings or an LLM. The current Dockerfile already runs as a non-root user, and Compose already binds to loopback, persists `/data`, enables a read-only root filesystem, drops capabilities, and includes a health check. CI already runs tests and compilation without API keys or model downloads. These configurations were reviewed as source; no deployment claim follows from that review.
+
+## 18. Residual risks
+
+- Agent orchestration is deterministic and does not provide model-selected tool calling or multi-hop planning. Search is repeated through RAG.
+- The search tool receives a size cap on returned text but the SQLite implementation still scans the owner's eligible vector rows.
+- Conversation records are persisted until explicitly deleted; no expiration policy is implemented. Database backup, access, and retention remain operator responsibilities.
+- Request metrics are in-memory and not suitable for multi-process aggregation or long-term telemetry.
+- Prompt injection remains a residual risk for probabilistic LLM output. Application authorization and citation checks remain the security boundary; prompts alone are not.

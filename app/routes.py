@@ -24,6 +24,8 @@ from app.errors import (
 from app.rag import NO_DOCUMENTS_ANSWER
 from app.models import UserRecord
 from app.services import ApplicationServices
+from app.tools import ToolRegistry
+from app.agent import AgentOrchestrator
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,33 @@ class AskRequest(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("Question must contain non-whitespace text.")
+        return cleaned
+
+
+class AgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=1, max_length=4000)
+    conversation_id: UUID | None = None
+
+    @field_validator("question")
+    @classmethod
+    def question_must_contain_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Question must contain non-whitespace text.")
+        return cleaned
+
+
+class ConversationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="New conversation", min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_contain_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Conversation title must contain non-whitespace text.")
         return cleaned
 
 
@@ -107,6 +136,92 @@ def readiness_check(
 ):
     services.store.check_ready()
     return {"status": "ready", "database": "ready"}
+
+
+@router.get("/metrics", summary="Process-local request metrics")
+def metrics(
+    request: Request,
+    _current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    return {"scope": "process", "requests": request.app.state.request_metrics.snapshot()}
+
+
+@router.get("/tools", summary="List available safe agent tools")
+def list_tools(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    _current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    registry = services.tools or ToolRegistry(services)
+    return {"tools": registry.descriptions}
+
+
+@router.post("/conversations", status_code=status.HTTP_201_CREATED)
+def create_conversation(
+    body: ConversationCreate,
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    return services.store.create_conversation(current_user.user_id, body.title.strip())
+
+
+@router.get("/conversations")
+def list_conversations(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    return {"conversations": services.store.list_conversations(current_user.user_id)}
+
+
+@router.get("/conversations/{conversation_id}")
+def get_conversation(
+    conversation_id: UUID,
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    conversation = services.store.get_conversation(current_user.user_id, str(conversation_id))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation was not found.")
+    return conversation
+
+
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(
+    conversation_id: UUID,
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    if not services.store.delete_conversation(current_user.user_id, str(conversation_id)):
+        raise HTTPException(status_code=404, detail="Conversation was not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/agent", summary="Run the bounded knowledge search workflow")
+def run_agent(
+    body: AgentRequest,
+    services: Annotated[ApplicationServices, Depends(get_services)],
+    current_user: Annotated[UserRecord, Depends(get_rate_limited_user)],
+):
+    conversation_id = str(body.conversation_id) if body.conversation_id else None
+    retrieval_query = body.question
+    if conversation_id:
+        conversation = services.store.get_conversation(current_user.user_id, conversation_id, limit=10)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation was not found.")
+        # Only recent user questions expand search; stored assistant/model text is
+        # never promoted into instructions or tool arguments.
+        previous = [m["content"] for m in conversation["messages"] if m["role"] == "user"][-2:]
+        history_budget = max(0, 4000 - len(body.question) - 1)
+        history_context = " ".join(previous)[-history_budget:] if history_budget else ""
+        retrieval_query = f"{history_context} {body.question}".strip()
+        services.store.add_conversation_message(current_user.user_id, conversation_id, "user", body.question)
+    agent = services.agent or AgentOrchestrator(services.tools or ToolRegistry(services), services.rag)
+    run = agent.run(body.question, current_user.user_id, retrieval_query)
+    if conversation_id:
+        services.store.add_conversation_message(current_user.user_id, conversation_id, "assistant", run.answer.answer)
+    return {
+        "question": body.question, "answer": run.answer.answer, "sources": run.answer.sources,
+        "conversation_id": conversation_id, "workflow": run.workflow,
+    }
 
 
 @router.post(

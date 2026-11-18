@@ -79,8 +79,10 @@ class DocumentService:
             owner_id=owner_id,
         )
 
-    def list_documents(self, owner_id: str | None = None) -> list[DocumentSummary]:
-        return self.store.list_documents(owner_id=owner_id)
+    def list_documents(
+        self, owner_id: str | None = None, limit: int | None = None
+    ) -> list[DocumentSummary]:
+        return self.store.list_documents(owner_id=owner_id, limit=limit)
 
     def delete_document(
         self, document_id: str, owner_id: str | None = None

@@ -440,3 +440,95 @@ The current code favors straightforward service composition, file-based persiste
 ### Alternatives considered
 
 The README and architecture guide identify PostgreSQL with pgvector, shared rate limiting, OCR, malware scanning, background ingestion, and evaluation/monitoring as possible future work. These are directions mentioned in project documentation, not implemented features or completed evaluations. Other scaling, identity, and document-processing products are general alternatives and have not been evaluated in this repository.
+
+
+## 15. Explicit read-only tools and deterministic orchestration
+
+### Context/problem
+
+The RAG API needs a practical agent workflow, while arbitrary model-selected operations would increase security risk and complicate local deterministic behavior.
+
+### Decision
+
+The project uses a fixed registry of three schema-validated, read-only knowledge tools. The orchestrator performs one knowledge search and delegates answer generation and citation checks to the existing RAG pipeline.
+
+### Reasoning
+
+The registered tools reuse owner-scoped document and vector store operations. Tool names are allowlisted; input schemas reject extras; result counts and excerpt sizes are bounded. The workflow does not grant shell, file, SQL, or arbitrary code execution. Both extractive and configured local language model providers continue to work through the existing answer interface.
+
+### Advantages
+
+- The tool surface is small and reviewable.
+- Authorization remains enforced in application queries.
+- Deterministic workflow limits make execution count predictable.
+- Existing RAG citations and abstention behavior remain the answer source of truth.
+
+### Trade-offs
+
+- The search is repeated by the answer pipeline, adding work.
+- The deterministic workflow does not dynamically choose tools or plan multiple tool actions.
+- A safe error is returned for failed tool execution, but richer per-tool timeout and distributed execution infrastructure is not present.
+
+### Alternatives considered
+
+Provider-native function calling and general-purpose agent frameworks are not implemented. The repository does not show a formal comparison of such frameworks.
+
+## 16. Conversation-scoped persisted history
+
+### Context/problem
+
+Follow-up questions need a durable session identifier, but global user memory would increase privacy and prompt-injection risks.
+
+### Decision
+
+Schema migration version 2 adds user-owned conversation and message tables. The agent stores the user question and answer, and uses only a small number of recent user questions as retrieval-query expansion. Assistant history is not treated as tool instructions.
+
+### Reasoning
+
+Foreign keys and owner-filtered queries provide deletion and isolation semantics. Input lengths, returned history, and list sizes are capped. Users can explicitly delete a conversation.
+
+### Advantages
+
+- Conversation access is tied to the authenticated user.
+- A follow-up can retrieve with a little recent question context.
+- The design avoids storing credentials and avoids promoting assistant output into tool directives.
+
+### Trade-offs
+
+- History is persisted until explicit deletion; automatic expiration is not implemented.
+- No summarization or assistant-history synthesis is provided, so this is limited conversation continuity.
+- SQLite stores the actual conversation text; operators must protect and back up the database appropriately.
+
+### Alternatives considered
+
+In-memory-only sessions and global user memory are not implemented. Global memory is deferred because the current use case is adequately served by conversation-scoped records and persistent cross-session profiling would add risk.
+
+## 17. Lightweight observability
+
+### Context/problem
+
+The application needs operational signals without requiring a monitoring service and without logging sensitive request content.
+
+### Decision
+
+Middleware emits request IDs and structured logs with route template, HTTP method, status, and duration. An authenticated endpoint returns process-local aggregate counters and duration totals.
+
+### Reasoning
+
+This uses the existing ASGI middleware and Python logging architecture. It avoids recording request bodies, prompts, tokens, answers, or raw unknown URL paths.
+
+### Advantages
+
+- Basic failures and request volume can be inspected locally.
+- No external service or dependency is required.
+- Route templates prevent per-document identifier metric cardinality.
+- Agent run logs expose bounded counts and durations without logging query or document content.
+
+### Trade-offs
+
+- Data resets at restart and is not aggregated across workers.
+- It is not a substitute for persistent metrics, tracing, alerting, or database instrumentation.
+
+### Alternatives considered
+
+Prometheus exporters and hosted monitoring are not implemented; the project does not document a formal vendor evaluation.

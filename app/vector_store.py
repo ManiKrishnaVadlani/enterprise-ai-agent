@@ -20,7 +20,7 @@ from app.models import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class SQLiteVectorStore:
@@ -110,6 +110,38 @@ class SQLiteVectorStore:
                             "add_users_tokens_and_document_ownership",
                             datetime.now(timezone.utc).isoformat(),
                         ),
+                    )
+                    latest_version = 1
+                if latest_version < 2:
+                    connection.execute(
+                        """CREATE TABLE conversations (
+                            conversation_id TEXT PRIMARY KEY,
+                            user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                            title TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        )"""
+                    )
+                    connection.execute(
+                        "CREATE INDEX idx_conversations_user_updated "
+                        "ON conversations(user_id, updated_at DESC)"
+                    )
+                    connection.execute(
+                        """CREATE TABLE conversation_messages (
+                            message_id TEXT PRIMARY KEY,
+                            conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+                            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                            content TEXT NOT NULL CHECK(length(content) <= 12000),
+                            created_at TEXT NOT NULL
+                        )"""
+                    )
+                    connection.execute(
+                        "CREATE INDEX idx_messages_conversation_created "
+                        "ON conversation_messages(conversation_id, created_at)"
+                    )
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                        (2, "add_user_owned_conversations", datetime.now(timezone.utc).isoformat()),
                     )
                 if self.embedding_model:
                     stored_model = connection.execute(
@@ -447,7 +479,11 @@ class SQLiteVectorStore:
             return 0.0
         return dot / (left_norm * right_norm)
 
-    def list_documents(self, owner_id: str | None = None) -> list[DocumentSummary]:
+    def list_documents(
+        self, owner_id: str | None = None, limit: int | None = None
+    ) -> list[DocumentSummary]:
+        if limit is not None and not 1 <= limit <= 1000:
+            raise ValueError("Document list limit must be between 1 and 1000.")
         try:
             with self._session() as connection:
                 where_clause = ""
@@ -455,15 +491,18 @@ class SQLiteVectorStore:
                 if owner_id is not None:
                     where_clause = " WHERE d.owner_id = ?"
                     parameters = (owner_id,)
-                rows = connection.execute(
+                query = (
                     """SELECT d.document_id, d.filename, d.ingested_at, d.owner_id,
                     COUNT(c.chunk_id) AS chunk_count FROM documents d
                     LEFT JOIN chunks c ON c.document_id = d.document_id
                     """
                     + where_clause
-                    + " GROUP BY d.document_id ORDER BY d.ingested_at DESC",
-                    parameters,
-                ).fetchall()
+                    + " GROUP BY d.document_id ORDER BY d.ingested_at DESC"
+                )
+                if limit is not None:
+                    query += " LIMIT ?"
+                    parameters = (*parameters, limit)
+                rows = connection.execute(query, parameters).fetchall()
         except sqlite3.Error as error:
             raise StorageError("Could not list stored documents.") from error
         return [
@@ -476,6 +515,29 @@ class SQLiteVectorStore:
             )
             for row in rows
         ]
+
+    def get_document_summary(
+        self, document_id: str, owner_id: str
+    ) -> DocumentSummary | None:
+        try:
+            with self._session() as connection:
+                row = connection.execute(
+                    """SELECT d.document_id, d.filename, d.ingested_at, d.owner_id,
+                    COUNT(c.chunk_id) AS chunk_count FROM documents d
+                    LEFT JOIN chunks c ON c.document_id = d.document_id
+                    WHERE d.document_id = ? AND d.owner_id = ?
+                    GROUP BY d.document_id""",
+                    (document_id, owner_id),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise StorageError("Could not retrieve document metadata.") from error
+        if row is None:
+            return None
+        return DocumentSummary(
+            document_id=row["document_id"], filename=row["filename"],
+            ingested_at=datetime.fromisoformat(row["ingested_at"]),
+            chunk_count=row["chunk_count"], owner_id=row["owner_id"],
+        )
 
     def delete_document(
         self, document_id: str, owner_id: str | None = None
@@ -506,3 +568,80 @@ class SQLiteVectorStore:
             return True
         except sqlite3.Error as error:
             raise StorageError("Document storage is not ready.") from error
+
+    def create_conversation(self, user_id: str, title: str) -> dict:
+        conversation_id = str(uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._session() as connection:
+                connection.execute(
+                    "INSERT INTO conversations VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, user_id, title[:120], now, now),
+                )
+        except sqlite3.Error as error:
+            raise StorageError("Could not create the conversation.") from error
+        return {"conversation_id": conversation_id, "title": title[:120], "created_at": now, "updated_at": now}
+
+    def add_conversation_message(self, user_id: str, conversation_id: str, role: str, content: str) -> dict | None:
+        if role not in {"user", "assistant"} or not content.strip() or len(content) > 12000:
+            raise ValueError("Conversation message is invalid or too large.")
+        message_id = str(uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._session() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO conversation_messages(message_id, conversation_id, role, content, created_at) "
+                    "SELECT ?, c.conversation_id, ?, ?, ? FROM conversations c "
+                    "WHERE c.conversation_id = ? AND c.user_id = ?",
+                    (message_id, role, content, now, conversation_id, user_id),
+                )
+                if not cursor.rowcount:
+                    return None
+                connection.execute("UPDATE conversations SET updated_at = ? WHERE conversation_id = ?", (now, conversation_id))
+                connection.execute(
+                    """DELETE FROM conversation_messages WHERE conversation_id = ?
+                    AND rowid NOT IN (
+                        SELECT rowid FROM conversation_messages
+                        WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 200
+                    )""",
+                    (conversation_id, conversation_id),
+                )
+        except sqlite3.Error as error:
+            raise StorageError("Could not save the conversation message.") from error
+        return {"message_id": message_id, "role": role, "content": content, "created_at": now}
+
+    def get_conversation(self, user_id: str, conversation_id: str, limit: int = 20) -> dict | None:
+        try:
+            with self._session() as connection:
+                row = connection.execute(
+                    "SELECT conversation_id, title, created_at, updated_at FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                    (conversation_id, user_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                messages = connection.execute(
+                    "SELECT message_id, role, content, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (conversation_id, max(1, min(limit, 50))),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError("Could not retrieve the conversation.") from error
+        return {**dict(row), "messages": [dict(message) for message in reversed(messages)]}
+
+    def list_conversations(self, user_id: str, limit: int = 50) -> list[dict]:
+        try:
+            with self._session() as connection:
+                rows = connection.execute(
+                    "SELECT conversation_id, title, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                    (user_id, max(1, min(limit, 100))),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError("Could not list conversations.") from error
+        return [dict(row) for row in rows]
+
+    def delete_conversation(self, user_id: str, conversation_id: str) -> bool:
+        try:
+            with self._session() as connection:
+                cursor = connection.execute("DELETE FROM conversations WHERE conversation_id = ? AND user_id = ?", (conversation_id, user_id))
+                return cursor.rowcount > 0
+        except sqlite3.Error as error:
+            raise StorageError("Could not delete the conversation.") from error
