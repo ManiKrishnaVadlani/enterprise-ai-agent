@@ -76,7 +76,12 @@ app/
   services.py          # application service composition
   text_extraction.py   # TXT and PDF extraction
   vector_store.py      # persistent SQLite cosine-search store
-docs/                  # architecture and technical decisions
+evaluation/
+  dataset.json         # fictional labeled RAG evaluation corpus
+  metrics.py           # retrieval metric calculations
+  run.py               # explicitly invoked evaluator CLI
+  runner.py            # isolated evaluation orchestration
+docs/                  # architecture, technical decisions, evaluation guide
 tests/                 # API, service, provider, and Python learning tests
 main.py                # FastAPI app factory and application entry point
 Dockerfile
@@ -254,13 +259,36 @@ python -m pytest -p no:cacheprovider -m "not http"
 
 The HTTP tests remain enabled in the complete suite and CI. A passing non-HTTP run does not replace running the HTTP tests in an environment where the Windows event loop can initialize.
 
-Run the deterministic local RAG quality smoke set independently with:
+Run the labeled, deterministic RAG evaluation framework with:
+
+```powershell
+python -m evaluation.run
+```
+
+Run retrieval or answer checks separately, filter categories, and optionally save a content-free JSON report:
+
+```powershell
+python -m evaluation.run --mode retrieval
+python -m evaluation.run --mode answers
+python -m evaluation.run --category answerable --category multi_evidence
+python -m evaluation.run --json-output "$env:TEMP\rag-evaluation.json"
+```
+
+The default evaluator uses the deterministic local embedder and extractive answer provider. It ingests fictional data into a temporary SQLite database and deletes it after the run. It reads the current local chunking, top-k, and relevance-threshold settings without touching the production database. OpenAI is not an available evaluation provider.
+
+To explicitly evaluate the configured local Ollama provider, use:
+
+```powershell
+python -m evaluation.run --provider ollama
+```
+
+Ollama must already be running with the configured model installed. This command does not pull or download a model. Local LLM results may vary; the deterministic test suite does not require Ollama. See [docs/evaluation.md](docs/evaluation.md) for the dataset schema, metrics, and limitations. The separate existing retrieval smoke tests remain available with:
 
 ```powershell
 python -m pytest -p no:cacheprovider tests/test_rag_evaluation.py
 ```
 
-It uses the local embedding and extractive providers only; it does not call OpenAI or require API credits.
+Both evaluation suites use local providers only by default; they do not call OpenAI or require API credits.
 
 ## Docker deployment
 

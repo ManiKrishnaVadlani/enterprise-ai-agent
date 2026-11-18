@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "filename": "access-cadence.txt",
+      "text": "Access reviews happen quarterly."
+    },
+    {
+      "filename": "access-ownership.txt",
+      "text": "Security owners record access reviews in the governance register."
+    },
+    {
+      "filename": "remote-access.txt",
+      "text": "Remote access requires multifactor authentication."
+    },
+    {
+      "filename": "ticket-retention.txt",
+      "text": "Support tickets are retained for 180 days. A legal hold pauses deletion until release."
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "cadence-answerable",
+      "question": "When do access reviews happen?",
+      "category": "answerable",
+      "answerable": true,
+      "expected_behavior": "answer",
+      "expected_facts": ["quarterly"],
+      "retrieval_targets": [
+        {"filename": "access-cadence.txt", "text_contains": "Access reviews happen quarterly."}
+      ],
+      "expected_source_files": ["access-cadence.txt"]
+    },
+    {
+      "case_id": "remote-access-answerable",
+      "question": "What does remote access require?",
+      "category": "answerable",
+      "answerable": true,
+      "expected_behavior": "answer",
+      "expected_facts": ["multifactor authentication"],
+      "retrieval_targets": [
+        {"filename": "remote-access.txt", "text_contains": "Remote access requires multifactor authentication."}
+      ],
+      "expected_source_files": ["remote-access.txt"]
+    },
+    {
+      "case_id": "multi-evidence-access-review",
+      "question": "When do access reviews happen, and what record?",
+      "category": "multi_evidence",
+      "answerable": true,
+      "expected_behavior": "answer",
+      "expected_facts": ["quarterly", "security owners record"],
+      "retrieval_targets": [
+        {"filename": "access-cadence.txt", "text_contains": "Access reviews happen quarterly."},
+        {"filename": "access-ownership.txt", "text_contains": "Security owners record access reviews"}
+      ],
+      "expected_source_files": ["access-cadence.txt", "access-ownership.txt"]
+    },
+    {
+      "case_id": "legal-hold-distractor",
+      "question": "Does a legal hold require court approval?",
+      "category": "distractor",
+      "answerable": false,
+      "expected_behavior": "abstain",
+      "expected_facts": [],
+      "retrieval_targets": [
+        {"filename": "ticket-retention.txt", "text_contains": "A legal hold pauses deletion until release."}
+      ],
+      "expected_source_files": []
+    },
+    {
+      "case_id": "missing-office-fax",
+      "question": "What is the office fax number?",
+      "category": "unanswerable",
+      "answerable": false,
+      "expected_behavior": "abstain",
+      "expected_facts": [],
+      "retrieval_targets": [],
+      "expected_source_files": []
+    }
+  ]
+}
