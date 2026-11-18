@@ -306,7 +306,7 @@ Both evaluation suites use local providers only by default; they do not call Ope
 
 ## Docker deployment
 
-Compose defaults to local demo mode and binds the published API port to `127.0.0.1`. The service runs as a non-root user, with a read-only root filesystem, temporary `/tmp`, dropped Linux capabilities, and the named `agent-data` volume mounted at `/data`. Compose does not pass an OpenAI API key; keep this container in local mode. OpenAI mode remains available for direct local runs when explicitly configured.
+Compose defaults to local demo mode and binds the published API port to `127.0.0.1`. The API runs as non-root `appuser` (UID/GID 10001), with a read-only root filesystem, temporary `/tmp`, dropped Linux capabilities, and the named `agent-data` volume mounted at `/data`. The entrypoint checks the mounted directory and its SQLite files before starting the API. Compose does not pass an OpenAI API key; keep this container in local mode. OpenAI mode remains available for direct local runs when explicitly configured.
 
 1. Install Docker Desktop with Compose support.
 2. Compose intentionally runs only the no-key local mode. For a direct local Python run, OpenAI providers can be enabled with `AI_MODE=openai` and `OPENAI_API_KEY` in the shell or ignored `.env` file; this may incur charges.
@@ -322,6 +322,20 @@ Compose defaults to local demo mode and binds the published API port to `127.0.0
 5. Stop the API with `docker compose down`. The named `agent-data` volume retains SQLite data. To intentionally remove that persistent data, use `docker compose down -v`.
 
 SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. Avoid `docker compose down -v` unless you intentionally want to remove the persistent database volume.
+
+### Railway persistent volume
+
+Attach the Railway volume to the backend service at the exact mount path `/data`. Keep both configured database paths under that mount:
+
+```text
+DATABASE_PATH=/data/knowledge.db
+LOCAL_DATABASE_PATH=/data/knowledge-local.db
+RAILWAY_RUN_UID=0
+```
+
+Railway mounts volumes at service startup as root, after the image is built. The image's build-time ownership of `/data` therefore does not set the mounted volume's ownership. `RAILWAY_RUN_UID=0` is safe here only because the container entrypoint first verifies the `/data` mount, then changes ownership of that directory and the two recognized SQLite database files/sidecars to UID/GID 10001, and finally uses `gosu` to re-exec this bootstrap and Uvicorn as `appuser`. Do not set this variable on a deployment that starts Uvicorn directly: in that case the application would run as root. If mount validation, ownership setup, or the privilege drop fails, startup stops with an error.
+
+Before attaching a volume to a service that already has data, back up or migrate its existing database files. A volume mounted at `/data` hides files that were previously present at that path in the container. Uploaded original PDF/TXT files are not persisted; the extracted content and indexes live in SQLite.
 
 ## Known limitations and future improvements
 
