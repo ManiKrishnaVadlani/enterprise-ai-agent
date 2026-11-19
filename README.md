@@ -1,366 +1,399 @@
 # Enterprise AI Knowledge & Workflow Agent
 
-A modular FastAPI Retrieval-Augmented Generation (RAG) MVP. It accepts PDF and UTF-8 TXT files, extracts and chunks their text, stores vectors persistently, retrieves relevant passages, and returns answers with source metadata. It defaults to a local demo mode that needs no OpenAI credentials or paid API calls; OpenAI providers remain available as an explicit option.
+A full-stack document question-answering application built around a FastAPI service and a React/TypeScript web client. Users can upload PDF and UTF-8 TXT files, search their own indexed documents, ask questions with source citations, and continue saved conversations. The default provider setup runs locally without OpenAI credentials or paid API calls.
 
-## Business problem
+This is a small demonstration project. It does not claim production-scale capacity or semantic retrieval accuracy.
 
-Organizations keep useful policies and procedures in documents that are difficult to search. This service provides a small, auditable question-answering API that grounds responses in uploaded documents and returns the passages used as sources.
+## Problem and objectives
 
-## Features
+Policies, procedures, and other internal documents are hard to search manually. This project explores a traceable workflow for extracting text, finding relevant passages, and returning answers linked to the documents that supplied the evidence.
 
-- PDF and UTF-8 TXT extraction, validation, size limits, and path-safe filenames.
-- Configurable character chunking with overlap and page-aware PDF metadata.
-- Local deterministic feature-hash embeddings and extractive answers for no-cost end-to-end demos.
-- Optional Ollama local chat and OpenAI embedding/chat provider adapters, selected through environment variables.
-- Persistent SQLite storage for document metadata, chunks, and embeddings.
-- Bearer-token authentication with user-owned document listing, retrieval, and deletion.
-- Cosine-similarity retrieval, configurable top-k, optional document filtering, and source citations.
-- Document upload, list, and delete API operations.
-- Privacy-safe request logging, bounded uploads and PDF processing, authenticated rate limits, safe API errors, and configurable CORS.
-- Mock-based tests that do not make paid API calls.
-- An authenticated, allowlisted agent workflow with knowledge search, document listing, and metadata-only document lookup tools.
-- User-owned conversations with bounded history persistence and follow-up question retrieval expansion.
-- Process-local request metrics and request IDs, with privacy-safe operational logging.
-- Duplicate passage suppression before context assembly.
+The implementation aims to:
 
-## Architecture and request flow
+- Provide an end-to-end local RAG workflow with persistent storage.
+- Make document and conversation access user-scoped.
+- Keep provider integrations replaceable and testable.
+- Return citations from retrieved passages and abstain when evidence is insufficient.
+- Keep local demos independent from paid API services.
 
-```mermaid
-flowchart LR
-    Client --> API[FastAPI routes]
-    API --> Ingest[Document service]
-    Ingest --> Extract[PDF / TXT extraction]
-    Extract --> Chunk[Chunking]
-    Chunk --> Embed[Embedding provider]
-    Embed --> Store[(SQLite vector store)]
-    API --> RAG[RAG pipeline]
-    RAG --> Embed
-    RAG --> Store
-    Store --> RAG
-    RAG --> LLM[Language model provider]
-    LLM --> RAG
-    RAG --> API
-```
+## Implemented features
 
-Documents are read into memory, extracted, divided into chunks, embedded, and written to SQLite. Uploaded files are not saved. For a question, the service embeds the query, ranks stored chunks by cosine similarity, and filters low-scoring results. `LLM_PROVIDER` selects extractive, local Ollama, or OpenAI answer generation. The RAG pipeline validates source references in application code before returning citations. If no useful passage is found, it returns a safe no-information response.
+- PDF and UTF-8 TXT ingestion, including UTF-8 BOM handling, path-safe filenames, and configurable limits.
+- Page-aware PDF extraction and deterministic text chunking with overlap.
+- Local deterministic feature-hash embeddings and cosine-similarity retrieval from SQLite.
+- Extractive local answers by default; optional Ollama local generation and OpenAI embedding/chat providers.
+- Source references with document, chunk, optional page, and relevance-score metadata.
+- SHA-256-hashed bearer API tokens, administrator-controlled provisioning, revocation, and user-scoped documents/conversations.
+- A fixed agent workflow with three allowlisted read-only tools: knowledge search, document list, and document metadata lookup.
+- Bounded conversation history persisted in SQLite; recent user questions may expand follow-up retrieval.
+- Request IDs, privacy-conscious logs, process-local metrics, per-user rate limits, and bounded upload concurrency.
+- Responsive React/TypeScript interface for token sign-in, documents, assistant chat, conversations, and service status.
+- Pytest suite, local RAG evaluation CLI, GitHub Actions checks, Dockerfile, Docker Compose, and Railway volume bootstrap.
 
 ## Technology stack
 
-- Python 3.14 (the installed project interpreter is Python 3.14.7)
-- FastAPI and Pydantic
-- SQLite for persistent document and vector data
-- pypdf for PDF text extraction
-- OpenAI Python SDK for the optional paid provider mode
-- Python standard library for local feature hashing, extractive answers, and Ollama HTTP requests
-- pytest for automated tests
+| Area | Implementation |
+| --- | --- |
+| API | Python 3.14, FastAPI, Pydantic |
+| Persistence | SQLite; JSON-encoded vectors with cosine similarity calculated in Python |
+| Document processing | pypdf, deterministic character-based chunking |
+| Local embeddings | Python standard library feature hashing with BLAKE2b |
+| Answer providers | Extractive provider, optional Ollama HTTP API, optional OpenAI chat |
+| Hosted embeddings | Optional OpenAI embeddings |
+| Frontend | React, TypeScript, React Router, Vite, Tailwind CSS, lucide-react |
+| Backend checks | pytest, compileall, GitHub Actions |
+| Container | Docker, Docker Compose, gosu-based startup privilege drop |
 
-### Vector storage choice
+The OpenAI Python package is included in backend requirements for the optional provider. The default local/extractive path does not itself make OpenAI requests. Ollama and model weights are installed separately when that provider is used.
 
-The MVP uses a SQLite table with JSON-encoded vectors and a cosine-similarity scan. This gives the project durable local storage without requiring a separate database service. Search time grows linearly with the number of chunks, so this is intended for a small corpus. A future scale-up can move the store interface to PostgreSQL with pgvector.
+## Architecture
+
+The backend is a modular monolith: the API, document processing, provider adapters, orchestration, and SQLite store run in one application. The frontend is a separate Vite application that calls the existing API.
+
+High-level request and data flow:
+
+    Browser UI -> FastAPI routes -> authentication and user identity
+                                  -> ingestion -> extract -> chunk -> embed -> SQLite
+                                  -> RAG -> query embedding -> owner-filtered SQLite search
+                                         -> selected answer provider -> validated citations -> response
+
+### Document ingestion and RAG
+
+1. An authenticated client sends raw file bytes with an X-Filename header and application/octet-stream content type.
+2. The API reads the request in bounded chunks and enforces the upload limit. The document service validates the filename and file type.
+3. TXT is decoded as UTF-8; PDF text is extracted in page order. The original uploaded file is not retained.
+4. Extracted text is normalized and divided into bounded chunks. PDF page numbers are retained for citations.
+5. The configured embedding provider creates one vector per chunk. Document metadata, chunk text, and vectors are written transactionally to SQLite with the authenticated owner ID.
+6. For a question, the same embedding provider vectorizes the query. SQLite filters by owner and optional document ID; Python calculates cosine scores, applies a minimum score, sorts candidates, and returns the top results.
+7. Duplicate passages from the same document are suppressed before context assembly. The selected answer provider receives the question and retrieved context.
+8. The RAG pipeline returns only source metadata corresponding to source labels cited by the answer. If evidence is missing or source labels are invalid or absent, it returns the no-information response with an empty source list.
+
+### Embeddings and answer modes
+
+| Configuration | Embeddings | Answer generation |
+| --- | --- | --- |
+| AI_MODE=local, default LLM_PROVIDER | Deterministic local feature hashing | Extractive sentence selection |
+| AI_MODE=local, LLM_PROVIDER=ollama | Deterministic local feature hashing | Local Ollama model |
+| AI_MODE=openai with no LLM_PROVIDER override | OpenAI embeddings | OpenAI chat |
+| Any mode with LLM_PROVIDER=openai | Selected by AI_MODE | OpenAI chat |
+
+The local feature-hash embedder uses normalized word features and adjacent-word features in a fixed 384-dimensional vector by default. It is deterministic and does not download a model, but it is a lightweight lexical approximation: it does not understand meaning, synonyms, or context like a trained embedding model. Hash collisions are possible.
+
+The extractive provider selects up to three sentences based on meaningful question-term overlap and includes source labels. It does not compose or understand new prose and is not equivalent to an LLM. Ollama and OpenAI providers generate text and can still hallucinate; valid source IDs ensure references point to supplied passages but do not prove every statement is entailed by them.
+
+Vectors are stored as JSON text in SQLite and searched with a Python cosine-similarity scan. Search work grows with the number of stored chunks, so the current store is intended for a modest corpus. A relevance score is a ranking signal, not a calibrated confidence percentage. MIN_RELEVANCE_SCORE is the fallback cutoff; separate local and OpenAI overrides are available.
+
+### Agent workflow and tools
+
+The /agent endpoint runs a fixed workflow: one allowlisted knowledge search followed by the existing RAG answer and citation pipeline. The registry exposes three read-only tools:
+
+- knowledge_search returns bounded, owner-scoped passages.
+- document_list returns metadata for the authenticated user's documents.
+- document_info returns metadata for one owned document, not its contents.
+
+Tool inputs are Pydantic-validated, tool names are allowlisted, and the workflow does not expose shell, arbitrary SQL, filesystem access, or arbitrary code execution. It is controlled orchestration, not an autonomous planning agent.
+
+### Persistence and migrations
+
+SQLite stores users, token hashes, document metadata, chunk text, vectors, and conversation messages. Schema migrations are versioned: migration 1 added users, API tokens, and nullable document ownership; migration 2 added conversations. Existing documents are not assigned to an arbitrary user. Ownerless legacy documents remain stored but are excluded from user-scoped listing/search and return not-found for owner-scoped access.
+
+The database selected by AI_MODE is separate: local mode uses LOCAL_DATABASE_PATH, and OpenAI mode uses DATABASE_PATH. Switching modes does not migrate documents between those files. Back up the active database or Docker volume before changing deployment storage.
+
+## Frontend capabilities
+
+The React single-page application includes:
+
+- **Sign-in:** verifies an administrator-provisioned bearer token against the API. The token is held in browser sessionStorage, sent in the Authorization header, and cleared on logout or an HTTP 401.
+- **Overview:** shows document, chunk, and conversation counts plus API readiness.
+- **Knowledge base:** uploads PDF/TXT files with progress, lists indexed documents, and deletes owned documents.
+- **Assistant:** creates and resumes conversations, submits questions to the agent endpoint, and displays citations returned with new answers.
+- **Conversations:** lists, resumes, and deletes the current user's saved conversation history.
+- **Settings:** displays API/readiness status and provides session sign-out.
+- **Responsive layout:** CSS breakpoints adapt navigation, tables, and chat layout for smaller screens.
+
+The frontend does not create users or API tokens and does not expose provider configuration. Conversation messages are persisted as text; citation objects are not stored, so old answers do not regain citations when history is reloaded. Browser sessionStorage is accessible to JavaScript running on the page, so use a trusted frontend origin and apply deployment-specific browser security protections.
+
+There is no frontend unit or browser end-to-end test suite configured in frontend/package.json. Available frontend checks are TypeScript type checking and a Vite production build.
+
+## Backend API
+
+All routes and schemas are also available from FastAPI's OpenAPI interface at /docs.
+
+| Method | Path | Access | Purpose |
+| --- | --- | --- | --- |
+| GET | / | Public | Application status |
+| GET | /health | Public | Liveness response |
+| GET | /ready | Public | Checks SQLite readiness |
+| POST | /documents/upload | Bearer token | Index raw PDF/TXT bytes; requires X-Filename |
+| GET | /documents | Bearer token | List the current user's documents |
+| DELETE | /documents/{document_id} | Bearer token | Delete an owned document and its chunks |
+| POST | /ask | Bearer token | Retrieve passages and return an answer and citations |
+| GET | /tools | Bearer token | List allowlisted agent tool schemas |
+| POST | /agent | Bearer token | Run the bounded search-and-answer workflow |
+| GET, POST | /conversations | Bearer token | List or create conversations |
+| GET, DELETE | /conversations/{conversation_id} | Bearer token | Read or delete an owned conversation |
+| GET | /metrics | Bearer token | Read process-local aggregate request metrics |
+
+The upload endpoint expects the **raw file body**, not multipart/form-data. The response includes a document ID, filename, ingestion time, and chunk count. Ask/agent responses include answer text and source metadata (document ID, filename, chunk ID, optional PDF page number, and relevance score). POST /agent also returns conversation ID and bounded workflow status metadata.
+For example, from PowerShell in the repository root, set the token issued by the provisioning CLI and upload raw bytes:
+
+    $env:AGENT_API_TOKEN = "<paste the provisioned token>"
+    curl.exe -X POST "http://127.0.0.1:8000/documents/upload" -H "Authorization: Bearer $env:AGENT_API_TOKEN" -H "X-Filename: handbook.txt" -H "Content-Type: application/octet-stream" --data-binary "@handbook.txt"
+
+Ask a question and inspect the returned answer and source list:
+
+    curl.exe -X POST "http://127.0.0.1:8000/ask" -H "Authorization: Bearer $env:AGENT_API_TOKEN" -H "Content-Type: application/json" -d '{"question":"What does the handbook say about access reviews?"}'
+
+The token shown above is a placeholder. Do not paste a real token into a README, shared terminal transcript, or source file.
+
+
+## Authentication and security
+
+There is no public registration flow or username/password login. An administrator provisions a user and token through the CLI. Tokens are high-entropy values generated with Python's secrets module, shown once in an interactive terminal, and stored as SHA-256 hashes. The API hashes bearer tokens before lookup, checks token revocation and user activity, and returns 401 for missing or invalid credentials.
+
+Document and conversation reads, searches, and deletes are scoped to the authenticated user in application/database queries. SQLite enables foreign-key enforcement. User-facing errors are mapped to safe HTTP responses; unexpected errors do not return provider internals or document content. Request logs avoid prompts, answers, document text, bearer credentials, and token hashes.
+
+Uploads, PDF pages, extracted text, document chunks, local LLM prompt size, and concurrent uploads have configurable bounds. Rate limiting and metrics are process-local and reset when the service restarts; they do not coordinate across multiple workers or replicas. CORS uses an explicit allowlist and does not allow credentials.
+
+The local Docker Compose service binds port 8000 to host loopback, runs the API as UID/GID 10001, uses a read-only root filesystem, and drops Linux capabilities. The Railway bootstrap uses temporary root permission only when explicitly configured to repair volume ownership; it then re-executes the API as the non-root appuser. This does not replace a deployment-specific security review.
 
 ## Project structure
 
-```text
-app/
-  auth.py              # bearer-token authentication
-  chunking.py          # configurable text chunking
-  config.py            # environment settings
-  dependencies.py      # lazy service dependency
-  document_service.py  # ingestion, list, delete
-  embeddings.py        # local and OpenAI embedding providers
-  errors.py            # safe application exceptions
-  limits.py            # upload and request limits
-  llm.py               # extractive, Ollama, and OpenAI answer providers
-  local_text.py        # shared local token handling
-  logging_config.py    # privacy-conscious logging setup
-  models.py            # shared data objects
-  provisioning.py      # administrator user/token CLI
-  rag.py               # retrieval, context assembly, citations
-  tools.py             # schema-validated, allowlisted knowledge tools
-  agent.py             # bounded deterministic agent workflow
-  observability.py     # request IDs, safe logs, process-local metrics
-  routes.py            # FastAPI endpoints and error mapping
-  services.py          # application service composition
-  text_extraction.py   # TXT and PDF extraction
-  vector_store.py      # persistent SQLite cosine-search store
-evaluation/
-  dataset.json         # fictional labeled RAG evaluation corpus
-  metrics.py           # retrieval metric calculations
-  run.py               # explicitly invoked evaluator CLI
-  runner.py            # isolated evaluation orchestration
-docs/                  # architecture, technical decisions, evaluation, demo, interview, resume notes
-tests/                 # API, service, provider, and Python learning tests
-main.py                # FastAPI app factory and application entry point
-Dockerfile
-docker-compose.yml
-```
+Important files and folders (Python learning examples and generated/cache directories are omitted):
 
-## Requirements and configuration
+    .
+    ├── app/                         # FastAPI application and RAG services
+    │   ├── agent.py                 # Bounded agent orchestration
+    │   ├── auth.py                  # Bearer-token authentication
+    │   ├── config.py                # Environment configuration
+    │   ├── document_service.py      # Ingestion, listing, deletion
+    │   ├── embeddings.py            # Local and OpenAI embeddings
+    │   ├── llm.py                   # Extractive, Ollama, OpenAI answers
+    │   ├── rag.py                   # Retrieval, context, citations
+    │   ├── routes.py                # HTTP endpoints
+    │   ├── tools.py                 # Allowlisted tools
+    │   └── vector_store.py          # SQLite persistence and search
+    ├── docker/
+    │   └── volume-entrypoint.py     # Volume checks and privilege drop
+    ├── docs/
+    │   ├── architecture.md
+    │   ├── demo-guide.md
+    │   ├── evaluation.md
+    │   └── technical-decisions.md
+    ├── evaluation/                   # Labeled RAG evaluation CLI and dataset
+    ├── frontend/
+    │   ├── src/                      # React pages, API client, styles
+    │   ├── package.json
+    │   ├── package-lock.json
+    │   ├── vite.config.ts
+    │   └── README.md
+    ├── tests/                        # Backend, storage, provider, learning examples
+    ├── .github/workflows/ci.yml     # Backend CI on pushes and pull requests
+    ├── .env.example
+    ├── frontend/.env.example
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── main.py
+    ├── pytest.ini
+    └── requirements.txt
 
-Install Python 3.14 and create an environment. Local mode is selected by default and does not require an API key:
+## Prerequisites
 
-```powershell
-py -3.14 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-```
+- Python 3.14 and pip.
+- Node.js and npm for the web frontend.
+- Docker Desktop with Docker Compose for container use.
+- Optional: Ollama and a model downloaded separately.
+- Optional: an OpenAI API key and account credits if OpenAI providers are selected.
 
-With `AI_MODE=local`, upload, retrieval, and answering run without OpenAI credentials or network calls. By default `LLM_PROVIDER` is `extractive`; choose `ollama` for local generated answers or `openai` for hosted chat. OpenAI embeddings are selected separately with `AI_MODE=openai`. OpenAI requests can incur charges. The application never silently falls back to OpenAI or another answer provider.
+Python package versions are declared in requirements.txt; frontend package versions are managed by frontend/package-lock.json. The repository does not pin a Node version with an engines declaration.
 
-| Variable | Default | Purpose |
+## Local installation and configuration
+
+### Backend
+
+From the repository root in PowerShell:
+
+    py -3.14 -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    python -m pip install -r requirements.txt
+    if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+
+The example environment file selects local mode and contains no usable API key. Keep .env private; it is ignored by Git. For the default no-paid-API workflow, leave AI_MODE=local and LLM_PROVIDER blank or set it to extractive. Do not set LLM_PROVIDER=openai unless you intend to make hosted chat requests.
+
+### Environment variables
+
+The backend loads settings from the process environment and an optional root .env file. These are the application defaults; Docker overrides both database paths to /data.
+
+| Variable | Default | Description |
 | --- | --- | --- |
-| `AI_MODE` | `local` | Selects `local` or `openai`; invalid values stop startup |
-| `LLM_PROVIDER` | unset (resolves by `AI_MODE`) | `extractive`, `ollama`, or `openai`; local defaults to extractive and OpenAI mode defaults to OpenAI |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP endpoint; only loopback and `host.docker.internal` names are accepted |
-| `OLLAMA_MODEL` | `qwen3.5:2b-q4_K_M` | Installed Ollama model tag |
-| `OLLAMA_TIMEOUT_SECONDS` | `120` | Maximum wait for a local generation request |
-| `OLLAMA_TEMPERATURE` | `0.1` | Ollama generation temperature (0–2) |
-| `OLLAMA_THINK` | `false` | Disables separate reasoning output by default so answer text fits the output budget; set `true` only when desired and supported by the selected model |
-| `OLLAMA_NUM_PREDICT` | `512` | Maximum generated tokens (1–4096) |
-| `OLLAMA_CONTEXT_LENGTH` | `4096` | Ollama context window limit (512–32768 tokens) |
-| `OLLAMA_MAX_PROMPT_CHARS` | `12000` | Rejects oversized question plus retrieved context before sending it |
-| `OPENAI_API_KEY` | unset | Credential required if `AI_MODE=openai` embeddings or `LLM_PROVIDER=openai` answers are selected |
-| `APP_NAME` | `Enterprise AI Knowledge & Workflow Agent` | Root response and API title |
-| `LOG_LEVEL` | `INFO` | Application log level |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
-| `CHAT_MODEL` | `gpt-4.1-mini` | OpenAI answer model |
-| `DATABASE_PATH` | `data/knowledge.db` | SQLite file path for OpenAI mode |
-| `LOCAL_DATABASE_PATH` | `data/knowledge-local.db` | Separate SQLite file for local mode |
-| `CHUNK_SIZE` | `1000` | Maximum Unicode characters per chunk |
-| `CHUNK_OVERLAP` | `150` | Character overlap between chunks |
-| `MAX_DOCUMENT_CHUNKS` | `10000` | Maximum chunks allowed for one document |
-| `TOP_K` | `4` | Maximum retrieved passages (1–20) |
-| `MIN_RELEVANCE_SCORE` | `0.15` | Shared fallback minimum cosine score (0–1) |
-| `LOCAL_MIN_RELEVANCE_SCORE` | unset | Optional local provider override; tune with local evaluation cases |
-| `OPENAI_MIN_RELEVANCE_SCORE` | unset | Optional OpenAI provider override; tune separately for that model |
-| `MAX_UPLOAD_BYTES` | `10485760` | Maximum upload size (10 MiB) |
-| `MAX_CONCURRENT_UPLOADS` | `2` | Concurrent ingestion limit per process |
-| `UPLOAD_WAIT_TIMEOUT_SECONDS` | `5` | Maximum wait for an upload slot |
-| `MAX_PDF_PAGES` | `200` | Maximum pages per PDF |
-| `MAX_EXTRACTED_TEXT_CHARS` | `2000000` | Maximum extracted characters per document |
-| `RATE_LIMIT_REQUESTS` | `120` | Authenticated requests per user in the window |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Per-user sliding-window length |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated allowed origins |
+| AI_MODE | local | local selects local embeddings; openai selects OpenAI embeddings and, unless overridden, OpenAI chat. |
+| LLM_PROVIDER | derived | extractive, ollama, or openai; local mode defaults to extractive and OpenAI mode defaults to OpenAI. |
+| OPENAI_API_KEY | unset | Required for OpenAI embeddings or OpenAI answers. Calls may incur charges. |
+| EMBEDDING_MODEL | text-embedding-3-small | OpenAI embedding model name. |
+| CHAT_MODEL | gpt-4.1-mini | OpenAI chat model name. |
+| OLLAMA_BASE_URL | http://127.0.0.1:11434 | Local Ollama URL; only loopback and host.docker.internal hostnames are accepted. |
+| OLLAMA_MODEL | qwen3.5:2b-q4_K_M | Model tag already available to Ollama; the application does not download it. |
+| OLLAMA_TIMEOUT_SECONDS | 120 | Request timeout. |
+| OLLAMA_TEMPERATURE | 0.1 | Generation temperature, 0–2. |
+| OLLAMA_THINK | false | Whether to request separate model reasoning output. |
+| OLLAMA_NUM_PREDICT | 512 | Maximum generated tokens (1–4096). |
+| OLLAMA_CONTEXT_LENGTH | 4096 | Ollama context setting (512–32768). |
+| OLLAMA_MAX_PROMPT_CHARS | 12000 | Maximum combined question/context characters sent to local Ollama. |
+| DATABASE_PATH | data/knowledge.db | SQLite file used when AI_MODE=openai. |
+| LOCAL_DATABASE_PATH | data/knowledge-local.db | SQLite file used when AI_MODE=local. |
+| APP_NAME | Enterprise AI Knowledge & Workflow Agent | Application name in API responses. |
+| LOG_LEVEL | INFO | Python logging level. |
+| CHUNK_SIZE | 1000 | Maximum chunk length in Unicode characters. |
+| CHUNK_OVERLAP | 150 | Character overlap; must be smaller than chunk size. |
+| MAX_DOCUMENT_CHUNKS | 10000 | Maximum chunks ingested from one document. |
+| TOP_K | 4 | Maximum passages retained by RAG (1–20). |
+| MIN_RELEVANCE_SCORE | 0.15 | Fallback cosine-score cutoff (0–1). |
+| LOCAL_MIN_RELEVANCE_SCORE | unset | Optional local cutoff overriding MIN_RELEVANCE_SCORE. |
+| OPENAI_MIN_RELEVANCE_SCORE | unset | Optional OpenAI cutoff overriding the fallback. |
+| MAX_UPLOAD_BYTES | 10485760 | Maximum upload size, 10 MiB. |
+| MAX_CONCURRENT_UPLOADS | 2 | Maximum concurrent ingestion requests per process. |
+| UPLOAD_WAIT_TIMEOUT_SECONDS | 5 | How long an upload waits for a free processing slot. |
+| MAX_PDF_PAGES | 200 | Maximum pages processed from one PDF. |
+| MAX_EXTRACTED_TEXT_CHARS | 2000000 | Maximum extracted characters per document. |
+| RATE_LIMIT_REQUESTS | 120 | Authenticated requests per user per window. |
+| RATE_LIMIT_WINDOW_SECONDS | 60 | Per-user rate-limit window. |
+| CORS_ALLOWED_ORIGINS | http://localhost:3000,http://127.0.0.1:3000 | Comma-separated explicit HTTP(S) browser origins. |
 
-TXT content must be UTF-8; a UTF-8 BOM is accepted. Cleaning applies Unicode NFC normalization, normalizes line endings, collapses horizontal whitespace, removes control characters, and preserves paragraph breaks and punctuation. PDF extraction proceeds in page order and keeps page numbers. It conservatively retains line breaks because PDF layout is ambiguous; image-only or otherwise textless PDFs are rejected, and OCR is not included. Corrupt or encrypted PDFs produce a safe validation error.
+### Provision an API token
 
-Chunking preserves normalized paragraph and line boundaries where possible, then prefers sentence endings and word boundaries before a hard character cut. Short heading-like lines are kept with following content when the configured size permits it. Each chunk is at most `CHUNK_SIZE` Unicode characters; overlap is bounded and favors a whole preceding word. PDF pages are chunked separately so page citations remain accurate. `MAX_DOCUMENT_CHUNKS` bounds the chunk count before embedding; exceeding it fails ingestion without storing a partial document. These are deterministic formatting heuristics, not semantic layout analysis.
+Run provisioning from an interactive terminal. The plaintext token is displayed once; store it in approved secure storage. The database stores only its hash.
 
-SQLite creates its tables and indexes automatically when the store is first initialized. Back up the database file selected for the active mode (`LOCAL_DATABASE_PATH` or `DATABASE_PATH`); in Compose, back up the `agent-data` volume.
+    python -m app.provisioning create-user --display-name "Local user" --label "development"
+    python -m app.provisioning revoke --token-id <token-id>
 
-The selected embedding model is recorded in the store. Changing `EMBEDDING_MODEL` for an existing non-empty store is rejected because vectors from different models cannot be compared reliably; configure a new database and re-ingest the source documents to migrate.
+There is no public registration or token-management screen. Creating users/tokens uses the active database selected by the current environment.
 
-Local mode has its own database file so it will not mix local vectors with an existing OpenAI-backed index. Switching modes does not migrate or overwrite the other mode's documents; each mode maintains a separate index.
+### Start the backend
 
-### Local demo mode and OpenAI mode
+    python -m uvicorn main:app --reload
 
-`AI_MODE=local` is the default. Its embedding provider hashes normalized word and adjacent-word features into a fixed-size vector using only the Python standard library. The result is deterministic and searchable by cosine similarity, but it is a lightweight keyword-feature approximation: it does not understand meaning, synonyms, or context like a trained embedding model. Hash collisions are possible.
+API docs: http://127.0.0.1:8000/docs
+Liveness: http://127.0.0.1:8000/health
+Readiness: http://127.0.0.1:8000/ready
 
-The extractive answer provider selects up to three sentences from retrieved chunks. A sentence must cover at least half of the question's meaningful terms; candidates are ranked by question coverage and sentence precision. It appends each selected sentence's source label and abstains with the shared no-information response when evidence is insufficient. This is still lexical matching: it does not understand meaning, paraphrase, or synthesize claims, and is not equivalent to an LLM.
+### Start the frontend
 
-Retrieval applies the configured minimum score to all owner- and document-scoped candidates before taking the top-k passages. Local feature-hash and OpenAI embedding scores can have different distributions, so `LOCAL_MIN_RELEVANCE_SCORE` and `OPENAI_MIN_RELEVANCE_SCORE` can override the shared fallback independently. The repository's small evaluation set is a regression smoke test, not a universal score calibration dataset.
+In a second PowerShell terminal:
 
-To use OpenAI later, set `AI_MODE=openai` and provide `OPENAI_API_KEY`. This explicitly enables live embedding and chat requests, which may incur charges. If a provider call fails, the application reports an error; it never switches modes automatically.
+    Set-Location frontend
+    if (-not (Test-Path .env)) { Copy-Item .env.example .env }.local
+    npm ci
+    npm run dev
 
-#### Optional local LLM with Ollama
+The Vite development server binds to http://127.0.0.1:3000. The frontend example file uses that local API URL and a 10 MiB client upload limit. If you change the frontend origin or backend upload limit, update the backend CORS allowlist or VITE_MAX_UPLOAD_BYTES setting.
 
-The local LLM path keeps embeddings and SQLite in the application and sends only retrieved, owner-scoped context plus the question to a local Ollama runtime. It does not send prompts to OpenAI or another cloud provider. The RAG pipeline checks citation IDs in application code; this cannot prove every generated claim is entailed by a source. The model is instructed to ignore instructions inside documents and abstain when evidence is missing. Local models can still hallucinate.
+Vite variables are shipped to the browser and are not secrets. Do not put API tokens, OpenAI keys, or other private values in VITE_* variables.
 
-Hardware detected for this development machine: Intel Core i7-1355U (10 cores/12 threads), 15.69 GB RAM, Intel Iris Xe integrated graphics with dedicated VRAM not reported, and about 257 GB free on C: after testing. This is entry-level AI capable. Ollama 0.40.16 and `qwen3.5:2b-q4_K_M` (1,945,781,358 bytes, about 1.95 GB) were verified. The model ran on CPU; GPU acceleration was not used or verified. Free RAM was 5.76 GB before loading, about 3.9 GB while the model runner used about 1.95 GB, and 5.90 GB after unloading it. The live test answered a short fictional policy question in 3.47 seconds and abstained on an unsupported one in 4.96 seconds. These are small functional checks, not a performance benchmark. Memory and response time vary with context and other running applications.
+To make a frontend production bundle and serve it locally:
 
-Install Ollama for Windows from its official installer, then in PowerShell:
+    npm run typecheck
+    npm run build
+    npm run preview
 
-```powershell
-ollama pull qwen3.5:2b-q4_K_M
-ollama list
-```
+The start script serves dist/ on the platform-provided PORT; it is suitable for a Linux host configured to build the frontend and run its start script. The repository has no frontend Dockerfile or checked-in Railway service configuration.
 
-Set these values in `.env` to use local embeddings and local generated answers:
+## Tests and quality checks
 
-```dotenv
-AI_MODE=local
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen3.5:2b-q4_K_M
-OLLAMA_THINK=false
-```
+Backend tests use pytest. From the repository root:
 
-Start Ollama, then start the API as described below. The runtime and model were not installed or downloaded as part of this change. To return to the no-runtime local workflow, set `LLM_PROVIDER=extractive`. To use OpenAI embeddings and chat explicitly, set `AI_MODE=openai`, `LLM_PROVIDER=openai`, and configure `OPENAI_API_KEY`; this may incur charges. No automatic fallback occurs if Ollama is unavailable; the API returns a controlled provider error, and you can select extractive mode yourself.
+    python -m pytest -p no:cacheprovider
+    python -m compileall -q app tests main.py
 
-Ollama's default local API is `http://127.0.0.1:11434`. Direct host runs use that address. In Docker, Compose defaults to `http://host.docker.internal:11434`, but host reachability, firewall policy, and runtime listener configuration must be verified for the specific machine. Do not expose the Ollama listener on an untrusted network. Docker/local-runtime connectivity has not been tested here.
+HTTP tests are marked with the http marker. If the local Windows/Python environment cannot create the test client's socket pair, run the non-HTTP suite separately with:
 
-## Run locally
+    python -m pytest -p no:cacheprovider -m "not http"
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn main:app --reload
-```
+The GitHub Actions workflow runs on pushes and pull requests using Python 3.14. It installs backend requirements, compiles app, tests, and main.py, then runs the complete backend test suite on Ubuntu. The frontend has no configured pytest/Jest/Vitest/browser test suite; use npm run typecheck and npm run build for static checks and bundling.
 
-Open Swagger UI at `http://127.0.0.1:8000/docs`. The liveness endpoint is `/health`; `/ready` checks SQLite readiness.
+The local evaluation CLI runs a labeled fictional dataset against a temporary SQLite database. By default it uses local feature-hash embeddings and extractive answers, excludes OpenAI, and does not download a model:
 
-Provision an API user from an interactive terminal before calling protected document endpoints. The plaintext token is displayed once; store it securely. SQLite stores only its SHA-256 hash.
+    python -m evaluation.run
+    python -m evaluation.run --mode retrieval
+    python -m evaluation.run --mode answers
+    python -m evaluation.run --category answerable --category multi_evidence
+    python -m evaluation.run --json-output "$env:TEMP\rag-evaluation.json"
 
-```powershell
-python -m app.provisioning create-user --display-name "Local user" --label "development"
-python -m app.provisioning revoke --token-id <token-id>
-```
+The report contains aggregate retrieval/answer metrics but no retrieved text or generated answer content. To use an already-installed local Ollama provider, run python -m evaluation.run --provider ollama; this requires a running runtime/model and does not download one. The evaluation set is a small smoke/regression dataset, not a general quality benchmark. See [docs/evaluation.md](docs/evaluation.md).
 
-## API
+## Docker
 
-All endpoints are documented in Swagger/OpenAPI.
+Docker Compose runs only the local demo configuration. It binds the API to host loopback, mounts the named agent-data volume at /data, runs the application as UID/GID 10001, uses a read-only root filesystem, a bounded /tmp, drops capabilities, and sets no-new-privileges.
 
-| Method | Path | Behavior |
-| --- | --- | --- |
-| `GET` | `/` | Existing project status response |
-| `GET` | `/health` | Liveness check |
-| `GET` | `/ready` | SQLite readiness check |
-| `POST` | `/documents/upload` | Stream a PDF or TXT file into ingestion |
-| `GET` | `/documents` | List indexed documents and chunk counts |
-| `DELETE` | `/documents/{document_id}` | Delete a document and all its chunks |
-| `POST` | `/ask` | Retrieve passages and return an answer with sources |
-| `GET` | `/tools` | List the authenticated agent's available tool schemas |
-| `POST` | `/agent` | Run the bounded search-and-answer workflow; optionally continue a conversation |
-| `GET`, `POST` | `/conversations` | List owned conversations or create one |
-| `GET`, `DELETE` | `/conversations/{conversation_id}` | Read or delete an owned conversation and its history |
-| `GET` | `/metrics` | Read process-local request counts and aggregate durations |
+    docker compose config --quiet
+    docker compose up --build -d
+    docker compose ps
+    docker compose logs -f api
 
-`/`, `/health`, and `/ready` are public. Data, agent, conversation, tool-schema, and metrics routes require `Authorization: Bearer <token>`. Documents and conversations are scoped to their owner in SQLite queries. Legacy documents without an owner remain stored but are not visible in user-scoped list or search results; specific access and deletion return 404.
-
-Upload the raw file bytes with `X-Filename` and `Content-Type: application/octet-stream`:
-
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/documents/upload" `
-  -H "Authorization: Bearer $env:AGENT_API_TOKEN" `
-  -H "X-Filename: handbook.txt" `
-  -H "Content-Type: application/octet-stream" `
-  --data-binary "@handbook.txt"
-```
-
-Ask a question:
-
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/ask" `
-  -H "Authorization: Bearer $env:AGENT_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{"question":"What does the handbook say about access reviews?"}'
-```
-
-The answer response includes `question`, `answer`, and `sources`. Each source has a document ID, original filename, chunk ID, optional PDF page number, and relevance score. Sources correspond only to source labels cited by the returned answer. Missing or invalid source references produce the no-information response with an empty source list. You can scope retrieval with `{"question":"...","document_id":"..."}`.
-
-The `/agent` endpoint runs one fixed, bounded knowledge-search tool call and then reuses the existing RAG pipeline for answering and citation validation. It does not let a model execute arbitrary actions. To keep a conversation, create it with `POST /conversations`, then send its ID with `/agent`; recent user questions can expand retrieval for follow-ups, while assistant text is not used as tool instructions. The authenticated `/tools` endpoint documents the allowlisted tool schemas. `document_info` returns metadata only. `/metrics` exposes process-local aggregated request counts and duration totals; it is not a distributed monitoring backend.
-
-List indexed documents and delete a document with:
-
-```powershell
-curl.exe "http://127.0.0.1:8000/documents" -H "Authorization: Bearer $env:AGENT_API_TOKEN"
-curl.exe -X DELETE "http://127.0.0.1:8000/documents/<document-id>" -H "Authorization: Bearer $env:AGENT_API_TOKEN"
-```
-
-## Tests
-
-Install the requirements, then run the full suite:
-
-```powershell
-python -m pytest -p no:cacheprovider
-```
-
-All provider and storage tests use local fakes and do not call paid APIs. HTTP tests are marked `http` so the non-HTTP suite can run separately where Windows' Proactor loop cannot create its fallback local socket pair. No event-loop workaround is applied. Run non-HTTP tests with:
-
-```powershell
-python -m pytest -p no:cacheprovider -m "not http"
-```
-
-The HTTP tests remain enabled in the complete suite and CI. A passing non-HTTP run does not replace running the HTTP tests in an environment where the Windows event loop can initialize.
-
-Run the labeled, deterministic RAG evaluation framework with:
-
-```powershell
-python -m evaluation.run
-```
-
-Run retrieval or answer checks separately, filter categories, and optionally save a content-free JSON report:
-
-```powershell
-python -m evaluation.run --mode retrieval
-python -m evaluation.run --mode answers
-python -m evaluation.run --category answerable --category multi_evidence
-python -m evaluation.run --json-output "$env:TEMP\rag-evaluation.json"
-```
-
-The default evaluator uses the deterministic local embedder and extractive answer provider. It ingests fictional data into a temporary SQLite database and deletes it after the run. It reads the current local chunking, top-k, and relevance-threshold settings without touching the production database. OpenAI is not an available evaluation provider.
-
-To explicitly evaluate the configured local Ollama provider, use:
-
-```powershell
-python -m evaluation.run --provider ollama
-```
-
-Ollama must already be running with the configured model installed. This command does not pull or download a model. Local LLM results may vary; the deterministic test suite does not require Ollama. See [docs/evaluation.md](docs/evaluation.md) for the dataset schema, metrics, and limitations. The separate existing retrieval smoke tests remain available with:
-
-```powershell
-python -m pytest -p no:cacheprovider tests/test_rag_evaluation.py
-```
-
-Both evaluation suites use local providers only by default; they do not call OpenAI or require API credits.
-
-## Docker deployment
-
-Compose defaults to local demo mode and binds the published API port to `127.0.0.1`. The API runs as non-root `appuser` (UID/GID 10001), with a read-only root filesystem, temporary `/tmp`, dropped Linux capabilities, and the named `agent-data` volume mounted at `/data`. The entrypoint checks the mounted directory and its SQLite files before starting the API. Compose does not pass an OpenAI API key; keep this container in local mode. OpenAI mode remains available for direct local runs when explicitly configured.
-
-1. Install Docker Desktop with Compose support.
-2. Compose intentionally runs only the no-key local mode. For a direct local Python run, OpenAI providers can be enabled with `AI_MODE=openai` and `OPENAI_API_KEY` in the shell or ignored `.env` file; this may incur charges.
-3. From the repository directory, run:
-
-   ```powershell
-   docker compose up --build -d
-   docker compose ps
-   docker compose logs -f api
-   ```
-
-4. Open `http://localhost:8000/docs` and check `http://localhost:8000/ready`.
-5. Stop the API with `docker compose down`. The named `agent-data` volume retains SQLite data. To intentionally remove that persistent data, use `docker compose down -v`.
-
-SQLite lives in the mounted volume; local mode uses `/data/knowledge-local.db`. Avoid `docker compose down -v` unless you intentionally want to remove the persistent database volume.
+Browse to http://127.0.0.1:8000/docs and check readiness at http://127.0.0.1:8000/ready. Stop with docker compose down; the named volume persists. docker compose down -v removes that volume and its database.
 
 ### Railway persistent volume
 
-Attach the Railway volume to the backend service at the exact mount path `/data`. Keep both configured database paths under that mount:
+For the backend Docker service, mount a Railway volume at exactly /data and set:
 
-```text
-DATABASE_PATH=/data/knowledge.db
-LOCAL_DATABASE_PATH=/data/knowledge-local.db
-RAILWAY_RUN_UID=0
-```
+    DATABASE_PATH=/data/knowledge.db
+    LOCAL_DATABASE_PATH=/data/knowledge-local.db
+    RAILWAY_RUN_UID=0
 
-Railway mounts volumes at service startup as root, after the image is built. The image's build-time ownership of `/data` therefore does not set the mounted volume's ownership. `RAILWAY_RUN_UID=0` is safe here only because the container entrypoint first verifies the `/data` mount, then changes ownership of that directory and the two recognized SQLite database files/sidecars to UID/GID 10001, and finally uses `gosu` to re-exec this bootstrap and Uvicorn as `appuser`. Do not set this variable on a deployment that starts Uvicorn directly: in that case the application would run as root. If mount validation, ownership setup, or the privilege drop fails, startup stops with an error.
+The Docker entrypoint requires /data to appear as a mount and requires the database paths to match. When the container starts as root under the explicit Railway setting, it changes ownership only for /data and the two recognized SQLite files and their journal/WAL sidecars, verifies write access, and then uses gosu to re-execute itself and Uvicorn as appuser UID/GID 10001. It refuses unexpected symlinks and fails startup if initialization or privilege dropping fails. FastAPI does not run as root. Do not set RAILWAY_RUN_UID=0 if the entrypoint is bypassed.
 
-Before attaching a volume to a service that already has data, back up or migrate its existing database files. A volume mounted at `/data` hides files that were previously present at that path in the container. Uploaded original PDF/TXT files are not persisted; the extracted content and indexes live in SQLite.
+Mounting /data hides any files previously present at that image path. Back up or migrate existing data before attaching a new volume. The application stores extracted text and vectors in SQLite; it does not preserve the original PDF/TXT upload.
 
-## Known limitations and future improvements
+## Railway deployment links
 
-- SQLite similarity search scans all stored vectors; migrate to pgvector for larger corpora or concurrent workloads.
-- Authentication and document ownership are implemented, but this remains a local demonstration service. Rate limits are process-local; there is no administrator web interface or malware scanning. Do not expose it publicly with sensitive data without a deployment-specific security review.
-- Text-only PDFs are supported; OCR, Office documents, and HTML are not.
-- OpenAI and Ollama generated prose is probabilistic and may hallucinate despite grounding instructions. Extractive mode returns selected source sentences and can miss relevant wording when terms differ. Verify consequential answers against the returned sources.
-- No job queue, streaming answers, feedback capture, or external business-system actions are included. The agent has only a fixed read-only knowledge search/list/metadata workflow.
-- Conversation history is bounded and conversation-scoped; the application does not implement global user memory, summarization, or retention scheduling. Users can delete conversations explicitly.
-- Metrics and rate limits are process-local and reset on restart. There is no distributed metrics exporter or cross-worker aggregation.
-- Consider shared rate limiting, malware scanning, OCR, PostgreSQL with pgvector, background ingestion, and retrieval-quality monitoring before production use.
+The following URLs were supplied as deployment context. They were not reachable through the available live-check tool during this README review, so their current deployment/readiness status is **not independently verified**:
 
-## Screenshots
+- Frontend: [sparkling-blessing-production.up.railway.app](https://sparkling-blessing-production.up.railway.app)
+- Backend: [enterprise-ai-agent-production-5449bd79.up.railway.app](https://enterprise-ai-agent-production-5449bd79.up.railway.app)
+- Backend readiness endpoint: [enterprise-ai-agent-production-5449bd79.up.railway.app/ready](https://enterprise-ai-agent-production-5449bd79.up.railway.app/ready)
 
-Screenshots are not included yet. Add captured Swagger/API examples here after preparing a demo environment; do not include API tokens or private documents.
+Set backend CORS_ALLOWED_ORIGINS to the exact deployed frontend origin when enabling cross-origin browser requests. Railway variables and service settings are configured outside this repository; no Railway manifest is checked in. Confirm the deployment's volume, environment variables, logs, health checks, and HTTPS behavior in Railway before relying on these links.
 
-## Roadmap
+## Current implementation status
 
-- Evaluate hybrid lexical/vector retrieval on a larger, independently labeled local dataset before changing ranking.
-- Add operational retention and backup guidance for conversation data.
-- Consider a scalable vector index and shared rate limiting if deployment requirements exceed a single-process local demo.
-- Consider OCR and asynchronous ingestion only when document volume and file types justify the additional infrastructure.
+| Area | Status |
+| --- | --- |
+| Local backend workflow | Implemented: upload, extraction, chunking, local embeddings, SQLite, retrieval, extractive answers, citations |
+| Optional providers | Implemented: Ollama local chat and OpenAI embeddings/chat; live use requires separately configured services/credentials |
+| User isolation | Implemented: token-authenticated, owner-scoped document and conversation operations |
+| Agent | Implemented as a fixed one-search workflow over three read-only tools; no arbitrary action execution |
+| Conversations | Implemented with owner-scoped SQLite persistence and bounded recent user-question retrieval context |
+| Frontend | Implemented as a React/TypeScript browser client for existing API operations |
+| Evaluation | Implemented as a small local labeled-data smoke/regression tool |
+| Container and Railway volume bootstrap | Configuration and startup logic are present; actual image build and live volume behavior need verification in the target environment |
+| Live Railway URLs | Provided as context; not independently verified during this review |
 
-See [docs/architecture.md](docs/architecture.md), [docs/technical-decisions.md](docs/technical-decisions.md), and the [local demo guide](docs/demo-guide.md) for implementation details.
+## Limitations and future improvements
 
-## Web frontend
+Current limitations:
 
-A React and TypeScript web client is available in [`frontend/`](frontend/). It connects to the existing authenticated API for document management, the agent workflow, and saved conversations. See [frontend/README.md](frontend/README.md) for setup instructions. The frontend does not provision users or API tokens; create a token with the administrator CLI described above.
+- Only text-based PDF and UTF-8 TXT are supported. OCR, Office formats, HTML, and image-only PDFs are not implemented.
+- Local feature-hash vectors are lexical rather than semantic; synonym and paraphrase retrieval may be weak.
+- SQLite vectors are scanned in Python. There is no dedicated vector index or distributed database layer.
+- OpenAI and Ollama generation can produce unsupported text. Citation validation checks source references, not semantic entailment.
+- Rate limiting and metrics are process-local, reset on restart, and not shared across workers.
+- There is no background ingestion queue, streaming answer interface, malware scanning, feedback capture, or browser end-to-end testing.
+- The fixed agent can search and read metadata; it does not perform writes or actions in external business systems.
+- User and token administration is CLI-only. No account registration, password login, token issuance UI, or token refresh flow exists.
+- Conversation retention is user-managed; automatic expiration and history summarization are not implemented.
+- Production hosting hardening (including TLS termination, browser security headers/CSP, backups, monitoring, and capacity validation) depends on the deployment and is not established by this repository alone.
+
+Possible future work, subject to demonstrated need:
+
+- Evaluate retrieval changes on a larger independently labeled dataset before adjusting scoring.
+- Add OCR or asynchronous ingestion for suitable document volumes and formats.
+- Consider PostgreSQL/pgvector and shared rate limiting if the application outgrows one-process SQLite behavior.
+- Add retention, backup/restore, and operational monitoring policies.
+- Add browser-level frontend tests and deployment-specific security headers.
+
+## Technical documentation
+
+- [Architecture](docs/architecture.md)
+- [Technical decisions](docs/technical-decisions.md)
+- [Local demo guide](docs/demo-guide.md)
+- [RAG evaluation guide](docs/evaluation.md)
+- [Frontend setup guide](frontend/README.md)
